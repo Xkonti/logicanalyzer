@@ -65,7 +65,7 @@ namespace TerminalCapture
                 }),
                 new MenuBarItem ("_Help", new MenuItem [] {
                     new MenuItem("H_ow to use", "", ShowHelp),
-                    new MenuItem ("_About", "", () => MessageBox.Query(50, 14, "About", "Terminal Capture - LogicAnalyzer\n\nA terminal based frontend for the LogicAnalyzer project.\n\n(c) 2025\n\nAuthor: AgustÌn GimÈnez Bernad", "Ok"))
+                    new MenuItem ("_About", "", () => MessageBox.Query(50, 14, "About", "Terminal Capture - LogicAnalyzer\n\nA terminal based frontend for the LogicAnalyzer project.\n\nOriginally by Agust√≠n Gim√©nez Bernad\nModified by Beniamin Dudek, 2026", "Ok"))
                 })
             };
 

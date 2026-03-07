@@ -589,11 +589,11 @@ namespace LogicAnalyzer
         {
             try
             {
-                OpenUrl("https://github.com/gusmanb/logicanalyzer/wiki");
+                OpenUrl("https://github.com/Xkonti/logicanalyzer/wiki");
             }
-            catch 
-            { 
-                await this.ShowError("Cannot open page.", "Cannot start the default browser. You can access the online documentation in https://github.com/gusmanb/logicanalyzer/wiki");
+            catch
+            {
+                await this.ShowError("Cannot open page.", "Cannot start the default browser. You can access the online documentation in https://github.com/Xkonti/logicanalyzer/wiki");
             }
         }
 

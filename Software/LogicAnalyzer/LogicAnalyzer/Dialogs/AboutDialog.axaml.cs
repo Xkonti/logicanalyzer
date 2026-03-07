@@ -36,22 +36,22 @@ namespace LogicAnalyzer.Dialogs
         {
             try
             {
-                OpenUrl("https://github.com/gusmanb/logicanalyzer");
+                OpenUrl("https://github.com/Xkonti/logicanalyzer");
             }
             catch
             {
-                await this.ShowError("Cannot open page.", "Cannot start the default browser. You can access the online documentation in https://github.com/gusmanb/logicanalyzer");
+                await this.ShowError("Cannot open page.", "Cannot start the default browser. You can access the online documentation in https://github.com/Xkonti/logicanalyzer");
             }
         }
         private async void BtnLicense_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
         {
             try
             {
-                OpenUrl("https://github.com/gusmanb/logicanalyzer/blob/master/LICENSE");
+                OpenUrl("https://github.com/Xkonti/logicanalyzer/blob/main/LICENSE");
             }
             catch
             {
-                await this.ShowError("Cannot open page.", "Cannot start the default browser. You can access the online documentation in https://github.com/gusmanb/logicanalyzer/blob/master/LICENSE");
+                await this.ShowError("Cannot open page.", "Cannot start the default browser. You can access the online documentation in https://github.com/Xkonti/logicanalyzer/blob/main/LICENSE");
             }
         }
 
