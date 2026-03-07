@@ -1,0 +1,26 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="640" d:DesignHeight="450"
+        MaxWidth="640" MaxHeight="450"
+        MinWidth="640" MinHeight="450"
+        Icon="/Assets/Ico40.ico"
+        x:Class="LogicAnalyzer.Dialogs.AboutDialog"
+        Title="About LogicAnalyzer" ShowInTaskbar="False" CanResize="False"
+        WindowStartupLocation="CenterScreen"
+		    Topmost="True">
+  <Grid ColumnDefinitions="Auto,190">
+    <Image Source="/Assets/Logo.png" Margin="20" Height="420" Width="420"></Image>
+    <StackPanel Spacing="10" Grid.Column="1" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="10,20,20,30">
+      <TextBlock TextWrapping="Wrap">Originally by Agustín Giménez Bernad</TextBlock>
+      <TextBlock TextWrapping="Wrap">Modified by Beniamin Dudek, 2026</TextBlock>
+      <TextBlock TextWrapping="Wrap" Name="txtVersion">Version 6.5</TextBlock>
+      <TextBlock TextWrapping="Wrap" Name="txtLicense">Licensed under GPLv3+</TextBlock>
+      <HyperlinkButton Margin="0" Padding="0" HorizontalAlignment="Left" Name="lnkWebSite">Visit WebSite</HyperlinkButton>
+      <TextBlock TextWrapping="Wrap" Name="txtDecoders">Decoders from the LibSigrokDecode project. Licensed under GPLv3+</TextBlock>
+      <HyperlinkButton Margin="0" Padding="0" HorizontalAlignment="Left" Name="lnkSigrok">LibSigrokDecode Github</HyperlinkButton>
+      <Button Name="btnLicense" Margin="0,0,10,0">License</Button>
+    </StackPanel>
+  </Grid>
+</Window>

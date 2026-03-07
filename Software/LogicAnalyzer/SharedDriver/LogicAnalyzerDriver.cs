@@ -1,0 +1,1228 @@
+﻿#region Debug output control
+//#define DEBUG_MODE
+#endregion
+
+using System.Diagnostics;
+using System.IO.Ports;
+using System.Net;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Channels;
+
+namespace SharedDriver
+{
+
+    public class LogicAnalyzerDriver : AnalyzerDriverBase
+    {
+        #region Constants and static vars
+
+        static Regex regAddressPort = new Regex("([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)\\:([0-9]+)");
+        static Regex regChan = new Regex("^CHANNELS:([0-9]+)$");
+        static Regex regBuf = new Regex("^BUFFER:([0-9]+)$");
+        static Regex regFreq = new Regex("^FREQ:([0-9]+)$");
+        static Regex regBlast = new Regex("^BLASTFREQ:([0-9]+)$");
+        #endregion
+
+        #region Properties
+        public override bool IsCapturing { get { return capturing; } }
+        public override bool IsPreviewing { get { return previewing; } }
+        public override bool IsNetwork { get { return isNetwork; } }
+        public override string? DeviceVersion { get { return version; } }
+        public override int ChannelCount { get { return channelCount; } }
+        public override int MaxFrequency { get { return maxFrequency; } }
+        public override int BlastFrequency { get { return blastFrequency; } }
+        public override int BufferSize { get { return bufferSize; } }
+        public override AnalyzerDriverType DriverType
+        {
+            get
+            {
+                return isNetwork ?
+                    AnalyzerDriverType.Network :
+                    AnalyzerDriverType.Serial;
+            }
+        }
+        #endregion
+
+        #region Events
+        public override event EventHandler<CaptureEventArgs>? CaptureCompleted;
+        public override event EventHandler<PreviewEventArgs>? PreviewDataReceived;
+        #endregion
+
+        #region Variables
+        //General data
+        bool capturing = false;
+        bool previewing = false;
+        CancellationTokenSource? previewCts;
+        Task? previewTask;
+        AnalyzerChannel[]? previewChannels;
+        bool isNetwork;
+        string? version;
+        int channelCount;
+        int maxFrequency;
+        int blastFrequency;
+        int bufferSize;
+        string? devAddr;
+        ushort devPort;
+
+        //Comms variables
+        StreamReader? readResponse;
+        BinaryReader? readData;
+        Stream? baseStream;
+        SerialPort? sp;
+        TcpClient? tcpClient;
+
+        #endregion
+
+        public LogicAnalyzerDriver(string ConnectionString)
+        {
+            if (ConnectionString == null)
+                throw new ArgumentNullException(ConnectionString);
+
+            if (ConnectionString.IndexOf(":") != -1)
+                InitNetwork(ConnectionString);
+            else
+                InitSerialPort(ConnectionString, 115200);
+        }
+
+        #region Initialization code
+
+        private void InitSerialPort(string SerialPort, int Bauds)
+        {
+#if DEBUG_MODE
+
+            StoreDebugLog($"Initializing device in serial mode.");
+#endif
+            try
+            {
+                sp = new SerialPort(SerialPort, Bauds);
+                sp.RtsEnable = true;
+                sp.DtrEnable = true;
+                sp.NewLine = "\n";
+                sp.ReadBufferSize = 1024 * 1024;
+                sp.WriteBufferSize = 1024 * 1024;
+
+                sp.Open();
+
+                // Drain any pending data from firmware boot (e.g., CYW43 init messages)
+                Thread.Sleep(200);
+                sp.DiscardInBuffer();
+            }
+            catch (Exception ex)
+            {
+#if DEBUG_MODE
+
+                StoreDebugLog($"Error initializing serial port: {ex.Message} - {ex.StackTrace}.");
+#endif
+                throw;
+            }
+            baseStream = sp.BaseStream;
+
+            readResponse = new StreamReader(baseStream);
+            readData = new BinaryReader(baseStream);
+
+            OutputPacket pack = new OutputPacket();
+            pack.AddByte(0);
+
+            baseStream.Write(pack.Serialize());
+
+            baseStream.ReadTimeout = 10000;
+            version = readResponse.ReadLine();
+
+#if DEBUG_MODE
+
+            StoreDebugLog($"Device version: {version}");
+#endif
+
+            var devVersion = VersionValidator.GetVersion(version);
+
+            if (!devVersion.IsValid)
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device version {version}, minimum supported version: V{VersionValidator.MAJOR_VERSION}_{VersionValidator.MINOR_VERSION}");
+#endif
+                Dispose();
+                throw new DeviceConnectionException($"Invalid device version {DeviceVersion}, minimum supported version: V{VersionValidator.MAJOR_VERSION}_{VersionValidator.MINOR_VERSION}");
+            }
+
+            var freq = readResponse.ReadLine();
+            if (!GetFrequency(freq))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device frequency response, received value: {freq}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid device frequency response.");
+            }
+
+            var blast = readResponse.ReadLine();
+            if(!GetBlastFrequency(blast))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid blast frequency response, received value: {blast}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid blast frequency response.");
+            }
+
+            var bufString = readResponse.ReadLine();
+            if (!GetBufferSize(bufString))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device buffer size response, received value: {bufString}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid device buffer size response.");
+            }
+
+            var chanString = readResponse.ReadLine();
+            if (!GetChannelCount(chanString))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device channel count response, received value: {chanString}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid device channel count response.");
+            }
+
+            baseStream.ReadTimeout = Timeout.Infinite;
+
+#if DEBUG_MODE
+            StoreDebugLog($"Device initialized successfully. Received parameters: {freq}, {blast}, {bufString}, {chanString}");
+#endif
+        }
+
+        private void InitNetwork(string AddressPort)
+        {
+#if DEBUG_MODE
+
+            StoreDebugLog($"Initializing device in wifi mode.");
+#endif
+
+            var match = regAddressPort.Match(AddressPort);
+
+            if (match == null || !match.Success)
+            {
+#if DEBUG_MODE
+
+                StoreDebugLog($"Specified address/port is invalid.");
+#endif
+                throw new ArgumentException("Specified address/port is invalid");
+            }
+
+            devAddr = match.Groups[1].Value;
+            string port = match.Groups[2].Value;
+
+            if (!ushort.TryParse(port, out devPort))
+            {
+#if DEBUG_MODE
+
+                StoreDebugLog($"Specified address/port is invalid.");
+#endif
+                throw new ArgumentException("Specified address/port is invalid");
+            }
+
+            tcpClient = new TcpClient();
+
+            tcpClient.Connect(devAddr, devPort);
+            baseStream = tcpClient.GetStream();
+
+            readResponse = new StreamReader(baseStream);
+            readData = new BinaryReader(baseStream);
+
+            OutputPacket pack = new OutputPacket();
+            pack.AddByte(0);
+
+            baseStream.Write(pack.Serialize());
+
+            baseStream.ReadTimeout = 10000;
+            version = readResponse.ReadLine();
+
+#if DEBUG_MODE
+
+            StoreDebugLog($"Device version: {version}");
+#endif
+
+            var devVersion = VersionValidator.GetVersion(version);
+
+            if (!devVersion.IsValid)
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device version {version}, minimum supported version: V{VersionValidator.MAJOR_VERSION}_{VersionValidator.MINOR_VERSION}");
+#endif
+                Dispose();
+                throw new DeviceConnectionException($"Invalid device version {DeviceVersion}, minimum supported version: V{VersionValidator.MAJOR_VERSION}_{VersionValidator.MINOR_VERSION}");
+            }
+
+            var freq = readResponse.ReadLine();
+            if (!GetFrequency(freq))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device frequency response, received value: {freq}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid device frequency response.");
+            }
+
+            var blast = readResponse.ReadLine();
+            if (!GetBlastFrequency(blast))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid blast frequency response, received value: {blast}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid blast frequency response.");
+            }
+
+            var bufString = readResponse.ReadLine();
+            if (!GetBufferSize(bufString))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device buffer size response, received value: {bufString}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid device buffer size response.");
+            }
+
+            var chanString = readResponse.ReadLine();
+            if (!GetChannelCount(chanString))
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Invalid device channel count response, received value: {chanString}.");
+#endif
+                Dispose();
+                throw new DeviceConnectionException("Invalid device channel count response.");
+            }
+
+            baseStream.ReadTimeout = Timeout.Infinite;
+
+            isNetwork = true;
+#if DEBUG_MODE
+            StoreDebugLog($"Device initialized successfully. Received parameters: {freq}, {blast}, {bufString}, {chanString}");
+#endif
+        }
+        private bool GetChannelCount(string? chanString)
+        {
+
+            var match = regChan.Match(chanString ?? "");
+            if (!match.Success || !match.Groups[1].Success)
+                return false;
+
+            var chanStr = match.Groups[1].Value;
+            if (!int.TryParse(chanStr, out int chanVal))
+                return false;
+
+            channelCount = chanVal;
+            return true;
+        }
+        private bool GetBufferSize(string? bufString)
+        {
+
+            var match = regBuf.Match(bufString ?? "");
+            if (!match.Success || !match.Groups[1].Success)
+                return false;
+
+            var bufStr = match.Groups[1].Value;
+            if (!int.TryParse(bufStr, out int bufVal))
+                return false;
+
+            bufferSize = bufVal;
+            return true;
+        }
+        private bool GetFrequency(string? freq)
+        {
+
+            var match = regFreq.Match(freq ?? "");
+            if (!match.Success || !match.Groups[1].Success)
+                return false;
+
+            var freqStr = match.Groups[1].Value;
+            if (!int.TryParse(freqStr, out int freqVal))
+                return false;
+
+            maxFrequency = freqVal;
+            return true;
+        }
+        private bool GetBlastFrequency(string? blast)
+        {
+            var match = regBlast.Match(blast ?? "");
+            if (!match.Success || !match.Groups[1].Success)
+                return false;
+
+            var freqStr = match.Groups[1].Value;
+            if (!int.TryParse(freqStr, out int freqVal))
+                return false;
+
+            blastFrequency = freqVal;
+            return true;
+        }
+        #endregion
+
+        #region Capture code
+
+        public override CaptureError StartCapture(CaptureSession Session, Action<CaptureEventArgs>? CaptureCompletedHandler = null)
+        {
+            if (previewing)
+                StopRealtimePreview();
+
+#if DEBUG_MODE
+            StoreDebugLog($"Starting capture.");
+#endif
+
+            try
+            {
+                if (capturing || baseStream == null || readResponse == null)
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Error starting capture (busy)");
+#endif
+                    return CaptureError.Busy;
+                }
+
+                if (Session.CaptureChannels == null || Session.CaptureChannels.Length < 0)
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Error starting capture (bad params)");
+#endif
+                    return CaptureError.BadParams;
+                }
+                int requestedSamples = Session.PreTriggerSamples + (Session.PostTriggerSamples * ((ushort)Session.LoopCount + 1));
+
+                if (!ValidateSettings(Session, requestedSamples))
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Error starting capture (invalid settings)");
+#endif
+                    return CaptureError.BadParams;
+                }
+
+                var mode = GetCaptureMode(Session.CaptureChannels.Select(c => c.ChannelNumber).ToArray());
+
+                var request = ComposeRequest(Session, requestedSamples, mode);
+
+                OutputPacket pack = new OutputPacket();
+                pack.AddByte(1);
+                pack.AddStruct(request);
+
+                baseStream.Write(pack.Serialize());
+                baseStream.Flush();
+
+                baseStream.ReadTimeout = 10000;
+                var result = readResponse.ReadLine();
+                baseStream.ReadTimeout = Timeout.Infinite;
+
+                if (result == "CAPTURE_STARTED")
+                {
+                    capturing = true;
+                    Task.Run(() => ReadCapture(Session, requestedSamples, mode, CaptureCompletedHandler));
+#if DEBUG_MODE
+                    StoreDebugLog($"Capture started successfully.");
+#endif
+                    return CaptureError.None;
+                }
+
+#if DEBUG_MODE
+                StoreDebugLog($"Error starting capture (bad device response, received response: {result})");
+#endif
+
+                return CaptureError.HardwareError;
+            }
+            catch (Exception ex)
+            {
+#if DEBUG_MODE
+                StoreDebugLog($"Unhandled exception starting capture: {ex.Message} - {ex.StackTrace}");
+#endif
+                return CaptureError.HardwareError; 
+            }
+        }
+
+        private void ReadCapture(CaptureSession Session, int Samples, CaptureMode Mode, Action<CaptureEventArgs>? CaptureCompletedHandler)
+        {
+            try
+            {
+                if (readData == null)
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Error reading capture, no data reader available.");
+#endif
+                    throw new Exception("No data reader available");
+                }
+
+                uint length = readData.ReadUInt32();
+                UInt32[] samples = new UInt32[length];
+                UInt64[] timestamps = new UInt64[Session.LoopCount == 0 || !Session.MeasureBursts ? 0 : Session.LoopCount + 2];
+
+                BinaryReader rdData;
+
+                if (isNetwork)
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Reading network data");
+#endif
+                    rdData = readData;
+                }
+                else
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Reading serial data");
+#endif
+                    int bufLen = Samples * (Mode == CaptureMode.Channels_8 ? 1 : (Mode == CaptureMode.Channels_16 ? 2 : 4));
+
+                    if (Session.LoopCount == 0 || !Session.MeasureBursts)
+                        bufLen += 1;
+                    else
+                        bufLen += 1 + (Session.LoopCount + 2) * 4;
+
+                    byte[] readBuffer = new byte[bufLen];
+                    int left = readBuffer.Length;
+                    int pos = 0;
+
+                    while (left > 0 && sp.IsOpen)
+                    {
+                        pos += sp.Read(readBuffer, pos, left);
+                        left = readBuffer.Length - pos;
+                    }
+
+                    MemoryStream ms = new MemoryStream(readBuffer);
+                    rdData = new BinaryReader(ms);
+                }
+
+                switch (Mode)
+                {
+                    case CaptureMode.Channels_8:
+#if DEBUG_MODE
+                        StoreDebugLog($"Reading 8 bit data");
+#endif
+                        for (int buc = 0; buc < length; buc++)
+                            samples[buc] = rdData.ReadByte();
+                        break;
+                    case CaptureMode.Channels_16:
+#if DEBUG_MODE
+                        StoreDebugLog($"Reading 16 bit data");
+#endif
+                        for (int buc = 0; buc < length; buc++)
+                            samples[buc] = rdData.ReadUInt16();
+                        break;
+                    case CaptureMode.Channels_24:
+#if DEBUG_MODE
+                        StoreDebugLog($"Reading 24 bit data");
+#endif
+                        for (int buc = 0; buc < length; buc++)
+                            samples[buc] = rdData.ReadUInt32();
+                        break;
+                }
+
+                byte stampLength = rdData.ReadByte();
+
+                if (stampLength > 0)
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Timestamp data included in capture");
+#endif
+                    for (int buc = 0; buc < Session.LoopCount + 2; buc++)
+                        timestamps[buc] = rdData.ReadUInt32();
+                }
+
+                List<BurstInfo> bursts = new List<BurstInfo>();
+
+                //If there are timestamps, we need to adjust them, there can be a jitter up to 1us caused
+                //by the device, so we need to adjust the timestamps to be more accurate
+                if (timestamps.Length > 0)
+                {
+#if DEBUG_MODE
+                    StoreDebugLog($"Reading timestamp data");
+#endif
+
+                    double tickLength = 1000000000.0 / blastFrequency;
+
+                    //First we invert the lower part of the timestamps as systick counts in decreasing order
+                    for (int buc = 0; buc < timestamps.Length; buc++)
+                    {
+                        Debug.WriteLine(timestamps[buc].ToString("X8"));
+                        UInt64 tt = timestamps[buc];
+                        tt = (tt & 0xFF000000) | (0x00FFFFFF - (tt & 0x00FFFFFF));
+                        timestamps[buc] = tt;
+                    }
+
+                    //Next we calculate the ns per sample and the ns per burst
+                    double nsPerSample = 1000000000.0 / Session.Frequency;
+                    double ticksPerSample = nsPerSample / tickLength;
+                    double nsPerBurst = nsPerSample * Session.PostTriggerSamples;
+
+                    //We calculate the ticks per burst, as we know the device's CPU runs at 200Mhz we know that each
+                    //tick is 5ns, so we can determine how many ticks happen per burst
+                    double ticksPerBurst = nsPerBurst / tickLength;
+
+                    for (int buc = 1; buc < timestamps.Length; buc++)
+                    {
+
+                        //In case of rollback, we need to adjust the timestamps
+                        ulong top = timestamps[buc] < timestamps[buc - 1] ? timestamps[buc] + 0xFFFFFFFF : timestamps[buc];
+
+                        //If the difference between the timestamps is less than the ticks per burst, we adjust the timestamps
+                        if (top - timestamps[buc - 1] <= ticksPerBurst)
+                        {
+                            uint diff = (uint)(ticksPerBurst - (top - timestamps[buc - 1]) + (ticksPerSample * 2));
+
+                            for (int buc2 = buc; buc2 < timestamps.Length; buc2++)
+                                timestamps[buc2] += (uint)diff;
+                        }
+                    }
+
+                    //Finally we calculate the delays between each burst.
+                    //First timestamp is a sync timestamp, second timestamp is the end of the initial burst
+                    //so they are discarded
+                    var delays = new UInt64[timestamps.Length - 2];
+
+                    for (int buc = 2; buc < timestamps.Length; buc++)
+                    {
+                        //In case of rollback, we need to adjust the timestamps
+                        ulong top = timestamps[buc] < timestamps[buc - 1] ? timestamps[buc] + 0xFFFFFFFF : timestamps[buc];
+                        delays[buc - 2] = (UInt64)(((top - timestamps[buc - 1]) - ticksPerBurst) * tickLength);
+                        Debug.WriteLine(delays[buc - 2]);
+                    }
+
+                    for (int buc = 1; buc < timestamps.Length; buc++)
+                    {
+                        if (buc == 1)
+                        {
+                            BurstInfo burst = new BurstInfo
+                            {
+                                BurstSampleStart = Session.PreTriggerSamples,
+                                BurstSampleEnd = Session.PreTriggerSamples + Session.PostTriggerSamples,
+                                BurstSampleGap = 0,
+                                BurstTimeGap = 0
+                            };
+
+                            bursts.Add(burst);
+                        }
+                        else
+                        {
+                            BurstInfo burst = new BurstInfo
+                            {
+                                BurstSampleStart = Session.PreTriggerSamples + (Session.PostTriggerSamples * (buc - 1)),
+                                BurstSampleEnd = Session.PreTriggerSamples + (Session.PostTriggerSamples * buc),
+                                BurstSampleGap = (ulong)(delays[buc - 2] / nsPerSample),
+                                BurstTimeGap = (ulong)(delays[buc - 2])
+                            };
+
+                            bursts.Add(burst);
+                        }
+                    }
+                    //timestamps = delays;
+                }
+
+                Session.Bursts = bursts.ToArray();
+
+#if DEBUG_MODE
+                StoreDebugLog($"Extracting samples...");
+#endif
+
+                for (int buc = 0; buc < Session.CaptureChannels.Length; buc++)
+                    ExtractSamples(Session.CaptureChannels[buc], buc, samples);
+
+#if DEBUG_MODE
+                StoreDebugLog($"Capture read complete");
+#endif
+
+                if (CaptureCompletedHandler != null)
+                    CaptureCompletedHandler(new CaptureEventArgs { Success = true, Session = Session });
+                else if (CaptureCompleted != null)
+                    CaptureCompleted(this, new CaptureEventArgs { Success = true, Session = Session });
+
+                if (!isNetwork)
+                {
+                    try
+                    {
+                        rdData.BaseStream.Close();
+                        rdData.BaseStream.Dispose();
+                    }
+                    catch { }
+
+                    try
+                    {
+                        rdData.Close();
+                        rdData.Dispose();
+                    }
+                    catch { }
+                }
+                capturing = false;
+            }
+            catch (Exception ex)
+            {
+                if (!capturing)
+                    return;
+
+#if DEBUG_MODE
+                StoreDebugLog($"Unhandled exception reading capture: {ex.Message} - {ex.StackTrace}");
+#endif
+
+                capturing = false;
+
+                if (CaptureCompletedHandler != null)
+                    CaptureCompletedHandler(new CaptureEventArgs { Success = false, Session = Session });
+                else if (CaptureCompleted != null)
+                    CaptureCompleted(this, new CaptureEventArgs { Success = false, Session = Session });
+            }
+        }
+
+        private void ExtractSamples(AnalyzerChannel channel, int ChannelIndex, UInt32[]? samples)
+        {
+            if (channel == null || samples == null)
+                return;
+
+            //int idx = channel.ChannelNumber;
+            UInt32 mask = (UInt32)1 << ChannelIndex;
+            channel.Samples = samples.Select(s => (s & mask) != 0 ? (byte)1 : (byte)0).ToArray();
+        }
+
+        private CaptureRequest ComposeRequest(CaptureSession session, int requestedSamples, CaptureMode mode)
+        {
+            if (session.TriggerType == TriggerType.Edge || session.TriggerType == TriggerType.Blast)
+            {
+                CaptureRequest request = new CaptureRequest
+                {
+                    triggerType = (byte)(session.TriggerType),
+                    trigger = (byte)session.TriggerChannel,
+                    invertedOrCount = session.TriggerInverted ? (byte)1 : (byte)0,
+                    channels = new byte[32],
+                    channelCount = (byte)session.CaptureChannels.Length,
+                    frequency = (uint)session.Frequency,
+                    preSamples = (uint)session.PreTriggerSamples,
+                    postSamples = (uint)session.PostTriggerSamples,
+                    loopCount = (ushort)session.LoopCount,
+                    measure = session.MeasureBursts ? (byte)1 : (byte)0,
+                    captureMode = (byte)mode
+                };
+
+                for (int buc = 0; buc < session.CaptureChannels.Length; buc++)
+                    request.channels[buc] = (byte)session.CaptureChannels[buc].ChannelNumber;
+
+                return request;
+            }
+            else
+            {
+                double samplePeriod = 1000000000.0 / session.Frequency;
+                double delay = session.TriggerType == TriggerType.Fast ? TriggerDelays.FastTriggerDelay : TriggerDelays.ComplexTriggerDelay;
+                double delayPeriod = (1.0 / MaxFrequency) * 1000000000.0 * delay;
+                int offset = (int)(Math.Round((delayPeriod / samplePeriod) + 0.3, 0));
+
+                CaptureRequest request = new CaptureRequest
+                {
+                    triggerType = (byte)(session.TriggerType),
+                    trigger = (byte)session.TriggerChannel,
+                    invertedOrCount = (byte)session.TriggerBitCount,
+                    triggerValue = (UInt16)session.TriggerPattern,
+                    channels = new byte[32],
+                    channelCount = (byte)session.CaptureChannels.Length,
+                    frequency = (uint)session.Frequency,
+                    preSamples = (uint)(session.PreTriggerSamples + offset),
+                    postSamples = (uint)(session.PostTriggerSamples - offset),
+                    captureMode = (byte)mode
+                };
+
+                for (int buc = 0; buc < session.CaptureChannels.Length; buc++)
+                    request.channels[buc] = (byte)session.CaptureChannels[buc].ChannelNumber;
+
+                return request;
+            }
+        }
+
+        private bool ValidateSettings(CaptureSession session, int requestedSamples)
+        {
+            int[] numChan = session.CaptureChannels.Select(c => c.ChannelNumber).ToArray();
+            var captureLimits = GetLimits(numChan);
+
+            if (session.TriggerType == TriggerType.Edge)
+            {
+                if (
+                    numChan.Min() < 0 ||
+                    numChan.Max() > ChannelCount - 1 ||
+                    session.TriggerChannel < 0 ||
+                    session.TriggerChannel > ChannelCount || //MaxChannel + 1 = ext trigger
+                    session.PreTriggerSamples < captureLimits.MinPreSamples ||
+                    session.PostTriggerSamples < captureLimits.MinPostSamples ||
+                    session.PreTriggerSamples > captureLimits.MaxPreSamples ||
+                    session.PostTriggerSamples > captureLimits.MaxPostSamples ||
+                    requestedSamples > captureLimits.MaxTotalSamples ||
+                    session.Frequency < MinFrequency ||
+                    session.Frequency > MaxFrequency ||
+                    (session.MeasureBursts && session.LoopCount > 254) ||
+                    (session.MeasureBursts && session.PostTriggerSamples < 100) ||
+                    session.LoopCount > 65534
+                    )
+                    return false;
+            }
+            else if (session.TriggerType == TriggerType.Blast)
+            {
+                if (
+                    numChan.Min() < 0 ||
+                    numChan.Max() > ChannelCount - 1 ||
+                    session.TriggerChannel < 0 ||
+                    session.TriggerChannel > ChannelCount || //MaxChannel + 1 = ext trigger
+                    session.PreTriggerSamples < 0 ||
+                    session.PostTriggerSamples < captureLimits.MinPostSamples ||
+                    session.PreTriggerSamples > 0 ||
+                    session.PostTriggerSamples > captureLimits.MaxTotalSamples ||
+                    requestedSamples > captureLimits.MaxTotalSamples ||
+                    session.Frequency < BlastFrequency ||
+                    session.Frequency > BlastFrequency ||
+                        session.LoopCount != 0
+                    )
+                    return false;
+            }
+            else
+            {
+                if (
+                    numChan.Min() < 0 ||
+                    numChan.Max() > ChannelCount - 1 ||
+                    session.TriggerBitCount < 1 ||
+                    session.TriggerBitCount > (session.TriggerType == TriggerType.Complex ? 16 : 5) ||
+                    session.TriggerChannel < 0 ||
+                    session.TriggerChannel > 15 ||
+                    session.TriggerChannel + session.TriggerBitCount > (session.TriggerType == TriggerType.Complex ? 16 : 5) ||
+                    session.PreTriggerSamples < captureLimits.MinPreSamples ||
+                    session.PostTriggerSamples < captureLimits.MinPostSamples ||
+                    session.PreTriggerSamples > captureLimits.MaxPreSamples ||
+                    session.PostTriggerSamples > captureLimits.MaxPostSamples ||
+                    requestedSamples > captureLimits.MaxTotalSamples ||
+                    session.Frequency < MinFrequency ||
+                    session.Frequency > MaxFrequency
+                    )
+                    return false;
+            }
+
+            return true;
+        }
+
+        public override bool StopCapture()
+        {
+            if (previewing)
+                StopRealtimePreview();
+
+            if (!capturing)
+                return false;
+
+            capturing = false;
+
+            try
+            {
+                if (isNetwork)
+                {
+                    baseStream?.WriteByte(0xff);
+                    baseStream?.Flush();
+                    Thread.Sleep(2000);
+                    tcpClient?.Close();
+                    Thread.Sleep(1);
+                    tcpClient = new TcpClient();
+                    tcpClient.Connect(devAddr, devPort);
+                    baseStream = tcpClient.GetStream();
+                    readResponse = new StreamReader(baseStream);
+                    readData = new BinaryReader(baseStream);
+                }
+                else
+                {
+
+                    sp?.Write(new byte[] { 0xFF }, 0, 1);
+                    sp?.BaseStream.Flush();
+                    Thread.Sleep(2000);
+                    sp?.Close();
+                    Thread.Sleep(1);
+                    sp?.Open();
+                    baseStream = sp?.BaseStream;
+                    readResponse = new StreamReader(baseStream);
+                    readData = new BinaryReader(baseStream);
+                }
+            }
+            catch { }
+
+            return true;
+        }
+
+        #endregion
+
+        #region Bootloader-related functions
+        public override bool EnterBootloader()
+        {
+            try
+            {
+                if (capturing || baseStream == null || readResponse == null)
+                    return false;
+
+                OutputPacket pack = new OutputPacket();
+                pack.AddByte(4);
+                baseStream.Write(pack.Serialize());
+                baseStream.Flush();
+
+                baseStream.ReadTimeout = 10000;
+                var result = readResponse.ReadLine();
+
+                return result == "RESTARTING_BOOTLOADER";
+            }
+            catch { return false; }
+        }
+        #endregion
+
+        #region Network-related functions
+        public override unsafe bool SendNetworkConfig(string AccesPointName, string Password, string IPAddress, ushort Port, string Hostname = "")
+        {
+            try
+            {
+                if (isNetwork || baseStream == null || readResponse == null)
+                    return false;
+
+                NetConfig request = new NetConfig { Port = Port };
+                byte[] name = Encoding.ASCII.GetBytes(AccesPointName);
+                byte[] pass = Encoding.ASCII.GetBytes(Password);
+                byte[] addr = Encoding.ASCII.GetBytes(IPAddress);
+                byte[] host = Encoding.ASCII.GetBytes(Hostname);
+
+                Marshal.Copy(name, 0, new IntPtr(request.AccessPointName), name.Length);
+                Marshal.Copy(pass, 0, new IntPtr(request.Password), pass.Length);
+                Marshal.Copy(addr, 0, new IntPtr(request.IPAddress), addr.Length);
+                Marshal.Copy(host, 0, new IntPtr(request.Hostname), Math.Min(host.Length, 32));
+
+                OutputPacket pack = new OutputPacket();
+                pack.AddByte(2);
+                pack.AddStruct(request);
+
+                baseStream.Write(pack.Serialize());
+                baseStream.Flush();
+
+                baseStream.ReadTimeout = 5000;
+                var result = readResponse.ReadLine();
+                baseStream.ReadTimeout = Timeout.Infinite;
+
+                if (result == "SETTINGS_SAVED")
+                    return true;
+
+                return false;
+            }
+            catch
+            { return false; }
+        }
+        public override string? GetVoltageStatus()
+        {
+            if (!isNetwork)
+                return "UNSUPPORTED";
+
+            if(baseStream == null || readResponse == null)
+                return "DISCONNECTED";
+
+            OutputPacket pack = new OutputPacket();
+            pack.AddByte(3);
+
+            baseStream.Write(pack.Serialize());
+            baseStream.Flush();
+
+            baseStream.ReadTimeout = Timeout.Infinite;
+            var result = readResponse.ReadLine();
+            baseStream.ReadTimeout = Timeout.Infinite;
+
+            return result;
+        }
+        #endregion
+
+        public bool Blink()
+        {
+            if (isNetwork)
+                return false;
+
+            OutputPacket pack = new OutputPacket();
+            pack.AddByte(5);
+
+            baseStream.Write(pack.Serialize());
+            baseStream.Flush();
+
+            baseStream.ReadTimeout = 10000;
+            var result = readResponse.ReadLine();
+
+            return result == "BLINKON";
+        }
+
+        public bool StopBlink()
+        {
+            if (isNetwork)
+                return false;
+
+            OutputPacket pack = new OutputPacket();
+            pack.AddByte(6);
+
+            baseStream.Write(pack.Serialize());
+            baseStream.Flush();
+
+            baseStream.ReadTimeout = 10000;
+            var result = readResponse.ReadLine();
+
+            return result == "BLINKOFF";
+        }
+
+        #region Preview code
+
+        public override bool StartRealtimePreview(AnalyzerChannel[] channels, int intervalsPerSecond, int samplesPerInterval)
+        {
+            if (capturing || previewing || baseStream == null || readResponse == null)
+                return false;
+
+            if (channels == null || channels.Length == 0 || channels.Length > 24)
+                return false;
+
+            if (intervalsPerSecond < 1 || intervalsPerSecond > 60)
+                return false;
+
+            if (samplesPerInterval < 1 || samplesPerInterval > 16)
+                return false;
+
+            try
+            {
+                uint intervalUs = (uint)(1000000 / intervalsPerSecond);
+
+                PreviewRequest request = new PreviewRequest
+                {
+                    channels = new byte[32],
+                    intervalUs = intervalUs,
+                    channelCount = (byte)channels.Length,
+                    samplesPerInterval = (byte)samplesPerInterval
+                };
+
+                for (int i = 0; i < channels.Length; i++)
+                    request.channels[i] = (byte)channels[i].ChannelNumber;
+
+                OutputPacket pack = new OutputPacket();
+                pack.AddByte(7);
+                pack.AddStruct(request);
+
+                baseStream.Write(pack.Serialize());
+                baseStream.Flush();
+
+                // Read response byte-by-byte to avoid StreamReader buffering
+                // binary packet data that follows immediately
+                baseStream.ReadTimeout = 10000;
+                StringBuilder responseBuilder = new StringBuilder();
+                while (true)
+                {
+                    int b = baseStream.ReadByte();
+                    if (b == -1 || b == '\n') break;
+                    if (b != '\r') responseBuilder.Append((char)b);
+                }
+                var result = responseBuilder.ToString();
+                baseStream.ReadTimeout = Timeout.Infinite;
+
+                if (result != "PREVIEW_STARTED")
+                    return false;
+
+                previewChannels = channels;
+                previewing = true;
+                previewCts = new CancellationTokenSource();
+
+                previewTask = Task.Run(() => ReadPreviewStream(channels.Length, samplesPerInterval, previewCts.Token));
+
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ReadPreviewStream(int channelCount, int samplesPerInterval, CancellationToken ct)
+        {
+            try
+            {
+                int bytesPerSample = (channelCount + 7) / 8;
+                int dataSize = samplesPerInterval * bytesPerSample;
+                int packetSize = 2 + 1 + 1 + dataSize; // marker(2) + spi(1) + chCount(1) + data
+                byte[] packetBuf = new byte[packetSize];
+                while (previewing && !ct.IsCancellationRequested)
+                {
+                    // Read first marker byte
+                    int b = baseStream!.ReadByte();
+                    if (b == -1) break;
+
+                    if (b != 0xAB) continue;
+
+                    // Read second marker byte
+                    b = baseStream.ReadByte();
+                    if (b == -1) break;
+
+                    if (b != 0xCD) continue;
+
+                    // Read remaining packet (spi + chCount + data)
+                    int remaining = packetSize - 2;
+                    int pos = 0;
+                    while (pos < remaining)
+                    {
+                        int read = baseStream.Read(packetBuf, pos, remaining - pos);
+                        if (read <= 0) break;
+                        pos += read;
+                    }
+
+                    if (pos < remaining) break;
+
+                    byte recvSpi = packetBuf[0];
+                    byte recvChCount = packetBuf[1];
+
+                    if (recvSpi != samplesPerInterval || recvChCount != channelCount)
+                    {
+                        continue;
+                    }
+
+                    // Unpack samples: [sampleIndex][channelIndex] = 0 or 1
+                    byte[][] samples = new byte[samplesPerInterval][];
+                    int dataOffset = 2;
+
+                    for (int s = 0; s < samplesPerInterval; s++)
+                    {
+                        samples[s] = new byte[channelCount];
+                        for (int ch = 0; ch < channelCount; ch++)
+                        {
+                            int byteIdx = dataOffset + s * bytesPerSample + (ch / 8);
+                            int bitIdx = ch % 8;
+                            samples[s][ch] = (byte)((packetBuf[byteIdx] >> bitIdx) & 1);
+                        }
+                    }
+
+                    PreviewDataReceived?.Invoke(this, new PreviewEventArgs
+                    {
+                        Samples = samples,
+                        Channels = previewChannels!
+                    });
+                }
+
+            }
+            catch (Exception ex)
+            {
+                if (!previewing)
+                    return;
+
+                previewing = false;
+            }
+        }
+
+        public override bool StopRealtimePreview()
+        {
+            if (!previewing)
+                return false;
+
+            previewing = false;
+
+            try
+            {
+                previewCts?.Cancel();
+                previewTask?.Wait(2000);
+            }
+            catch { }
+
+            try
+            {
+                OutputPacket pack = new OutputPacket();
+                pack.AddByte(8);
+
+                if (isNetwork)
+                {
+                    baseStream?.Write(pack.Serialize());
+                    baseStream?.Flush();
+                    Thread.Sleep(500);
+                    tcpClient?.Close();
+                    Thread.Sleep(1);
+                    tcpClient = new TcpClient();
+                    tcpClient.Connect(devAddr, devPort);
+                    baseStream = tcpClient.GetStream();
+                    readResponse = new StreamReader(baseStream);
+                    readData = new BinaryReader(baseStream);
+                }
+                else
+                {
+                    sp?.Write(pack.Serialize(), 0, pack.Serialize().Length);
+                    sp?.BaseStream.Flush();
+                    Thread.Sleep(500);
+                    sp?.Close();
+                    Thread.Sleep(1);
+                    sp?.Open();
+                    baseStream = sp?.BaseStream;
+                    readResponse = new StreamReader(baseStream);
+                    readData = new BinaryReader(baseStream);
+                }
+            }
+            catch { }
+
+            previewCts = null;
+            previewTask = null;
+            previewChannels = null;
+
+            return true;
+        }
+
+        #endregion
+
+        #region IDisposable implementation
+        public override void Dispose()
+        {
+            if (previewing)
+                StopRealtimePreview();
+
+            if (IsCapturing)
+                StopCapture();
+
+            try
+            {
+                sp.Close();
+                sp.Dispose();
+            }
+            catch { }
+
+            try
+            {
+                tcpClient.Close();
+                tcpClient.Dispose();
+
+            }
+            catch { }
+
+            try
+            {
+                baseStream.Close();
+                baseStream.Dispose();
+            }
+            catch { }
+
+            try
+            {
+                readData.Close();
+                readData.Dispose();
+            }
+            catch { }
+
+            try
+            {
+                readResponse.Close();
+                readResponse.Dispose();
+            }
+            catch { }
+
+            sp = null;
+            baseStream = null;
+            readData = null;
+            readData = null;
+
+            CaptureCompleted = null;
+        }
+        #endregion
+
+        #region Debug functions
+#if DEBUG_MODE
+        private void StoreDebugLog(string Message, [CallerMemberName] string Caller = "")
+        {
+            try
+            {
+                File.AppendAllLines("driver_debug.log", new string[] { $"[{Caller}] {Message}" });
+            }
+            catch { }
+        }
+#endif
+        #endregion
+    }
+}

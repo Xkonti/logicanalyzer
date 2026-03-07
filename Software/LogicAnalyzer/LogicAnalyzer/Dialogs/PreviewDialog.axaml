@@ -1,0 +1,32 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:uc="clr-namespace:LogicAnalyzer.Controls;assembly=LogicAnalyzer"
+        mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="500"
+        MaxWidth="700" MinWidth="700" Width="700" MaxHeight="500" MinHeight="500" Height="500"
+        CanResize="False" WindowStartupLocation="CenterOwner"
+        x:Class="LogicAnalyzer.Dialogs.PreviewDialog"
+        Title="Realtime Preview Settings"
+        Background="#383838" Icon="/Assets/Ico40.ico">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="10">
+    <StackPanel Grid.Row="0" HorizontalAlignment="Center" Margin="0,0,0,10">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,5">
+        <TextBlock VerticalAlignment="Center" Margin="0,0,10,0">Probing frequency (samples/sec):</TextBlock>
+        <NumericUpDown Width="150" Height="35" Minimum="1" Maximum="960" Value="120" Name="nudProbingFrequency" FormatString="#,##0"></NumericUpDown>
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+        <TextBlock VerticalAlignment="Center" Margin="0,0,10,0">Max samples on screen:</TextBlock>
+        <NumericUpDown Width="150" Height="35" Minimum="100" Maximum="100000" Value="10000" Increment="500" Name="nudMaxSamples" FormatString="#,##0"></NumericUpDown>
+      </StackPanel>
+    </StackPanel>
+    <ScrollViewer Grid.Row="1" Margin="0,0,0,10">
+      <StackPanel Orientation="Vertical" Name="pnlChannels">
+      </StackPanel>
+    </ScrollViewer>
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button Name="btnAccept" Margin="0,0,10,0">Accept</Button>
+      <Button Name="btnCancel">Cancel</Button>
+    </StackPanel>
+  </Grid>
+</Window>
