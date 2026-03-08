@@ -1,24 +1,14 @@
 <template>
   <div class="row items-center no-wrap q-gutter-x-sm">
     <q-btn
-      :icon="drawerOpen ? 'chevron_right' : 'tune'"
-      flat
-      dense
-      round
-      :disable="!cap.isConnected"
-      title="Capture settings"
-      @click="$emit('toggle-drawer')"
-    />
-
-    <q-btn
       v-if="!cap.isCapturing"
       color="positive"
       icon="play_arrow"
       label="Capture"
-      :disable="!cap.canCapture"
+      :disable="!cap.isConnected || cap.isCapturing || preview.isPreviewing"
       no-caps
       dense
-      @click="cap.startCapture()"
+      @click="showCaptureDialog = true"
     />
 
     <q-btn
@@ -49,7 +39,7 @@
       color="purple"
       icon="monitor_heart"
       label="Realtime"
-      :disable="!preview.canStartPreview"
+      :disable="!cap.isConnected || cap.isCapturing || preview.isPreviewing"
       no-caps
       dense
       @click="showPreviewDialog = true"
@@ -89,6 +79,8 @@
       {{ preview.previewError }}
     </q-chip>
 
+    <CaptureDialog v-model="showCaptureDialog" />
+
     <PreviewDialog
       v-model="showPreviewDialog"
       @start="preview.startPreview()"
@@ -100,15 +92,11 @@
 import { ref } from 'vue'
 import { useCapture } from 'src/composables/useCapture.js'
 import { usePreview } from 'src/composables/usePreview.js'
+import CaptureDialog from 'src/components/capture/CaptureDialog.vue'
 import PreviewDialog from 'src/components/preview/PreviewDialog.vue'
-
-defineProps({
-  drawerOpen: { type: Boolean, default: false },
-})
-
-defineEmits(['toggle-drawer'])
 
 const cap = useCapture()
 const preview = usePreview()
+const showCaptureDialog = ref(false)
 const showPreviewDialog = ref(false)
 </script>

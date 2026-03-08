@@ -25,9 +25,7 @@
           :label="String(ch + 1)"
           :color="cap.triggerChannel === ch ? 'primary' : 'grey-8'"
           dense
-          flat
-          size="sm"
-          style="min-width: 28px"
+          outline
           @click="cap.triggerChannel = ch"
         />
       </div>
@@ -96,9 +94,11 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { useCapture } from 'src/composables/useCapture.js'
+import { useChannelConfigStore } from 'src/stores/channel-config.js'
 import { TRIGGER_EDGE, TRIGGER_COMPLEX, TRIGGER_FAST, TRIGGER_BLAST } from 'src/core/protocol/commands.js'
 
 const cap = useCapture()
+const channelConfig = useChannelConfigStore()
 
 const lastBurstCount = ref(2)
 
@@ -116,7 +116,7 @@ function onCategoryChange(val) {
 }
 
 const availableTriggerChannels = computed(() =>
-  Array.from({ length: cap.channelCount || 24 }, (_, i) => i),
+  [...channelConfig.selectedChannels].sort((a, b) => a - b),
 )
 
 // Blast mode computed get/set

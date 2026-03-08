@@ -1,13 +1,14 @@
 import { ref, shallowRef, computed } from 'vue'
 import { defineStore, acceptHMRUpdate } from 'pinia'
+import { useLocalStorage } from '@vueuse/core'
 import { useDeviceStore } from './device.js'
 import { useViewportStore } from './viewport.js'
 import { createChannel } from '../core/driver/types.js'
 
 export const usePreviewStore = defineStore('preview', () => {
-  // Config
-  const probingFrequency = ref(120)
-  const maxDisplaySamples = ref(10000)
+  // Config (persisted via localStorage)
+  const probingFrequency = useLocalStorage('la-preview-frequency', 120)
+  const maxDisplaySamples = useLocalStorage('la-preview-max-samples', 10000)
 
   // State
   const previewing = ref(false)

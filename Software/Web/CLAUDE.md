@@ -103,3 +103,7 @@ bunx vitest --watch
 - **Components never import from `core/` directly.** They go through composables and stores. The data flow is: `core/ → stores/ → composables/ → components/`.
 - **Quasar auto-imports components.** You don't need to manually import `<q-btn>`, `<q-input>`, etc. — Quasar's Vite plugin handles it.
 - **Boot files** in `src/boot/` run before the app mounts. Use them for global setup (e.g., checking Web Serial API availability).
+- Limit custom CSS to absolute minimum. We want to rely on the default styling provided by Quasar as much as we can. This means:
+  - avoid custom text sizes
+  - avoid using colors other than the ones provided by quasar
+  - rely on material design patterns

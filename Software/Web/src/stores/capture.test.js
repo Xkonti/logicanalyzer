@@ -1,7 +1,28 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useCaptureStore } from './capture.js'
+import { useChannelConfigStore } from './channel-config.js'
 import { useDeviceStore } from './device.js'
+
+function createMockStorage() {
+  const store = {}
+  return {
+    getItem: vi.fn((key) => store[key] ?? null),
+    setItem: vi.fn((key, value) => {
+      store[key] = value
+    }),
+    removeItem: vi.fn((key) => {
+      delete store[key]
+    }),
+    clear: vi.fn(() => {
+      for (const key of Object.keys(store)) delete store[key]
+    }),
+    get length() {
+      return Object.keys(store).length
+    },
+    key: vi.fn((i) => Object.keys(store)[i] ?? null),
+  }
+}
 
 // Mock device dependencies
 vi.mock('../core/driver/analyzer.js', () => {
@@ -68,8 +89,14 @@ vi.mock('../core/transport/serial.js', () => {
   return { SerialTransport: MockSerialTransport }
 })
 
+function selectChannels(...nums) {
+  const channelConfig = useChannelConfigStore()
+  channelConfig.setSelectedChannels(nums)
+}
+
 describe('useCaptureStore', () => {
   beforeEach(() => {
+    vi.stubGlobal('localStorage', createMockStorage())
     setActivePinia(createPinia())
   })
 
@@ -86,6 +113,16 @@ describe('useCaptureStore', () => {
     expect(capture.hasCapture).toBe(false)
   })
 
+  it('channels derived from channel-config', () => {
+    const capture = useCaptureStore()
+    const channelConfig = useChannelConfigStore()
+    channelConfig.setSelectedChannels([0, 1])
+    channelConfig.setName(0, 'CLK')
+    expect(capture.channels).toHaveLength(2)
+    expect(capture.channels[0].channelNumber).toBe(0)
+    expect(capture.channels[0].channelName).toBe('CLK')
+  })
+
   describe('updateConfig', () => {
     it('updates multiple config values', async () => {
       const capture = useCaptureStore()
@@ -100,25 +137,6 @@ describe('useCaptureStore', () => {
       const capture = useCaptureStore()
       await capture.updateConfig({ triggerType: 3 })
       expect(capture.triggerType).toBe(3)
-    })
-  })
-
-  describe('addChannel / removeChannel', () => {
-    it('adds a channel', async () => {
-      const capture = useCaptureStore()
-      await capture.addChannel(0, 'CLK')
-      expect(capture.channels).toHaveLength(1)
-      expect(capture.channels[0].channelNumber).toBe(0)
-      expect(capture.channels[0].channelName).toBe('CLK')
-    })
-
-    it('removes a channel by number', async () => {
-      const capture = useCaptureStore()
-      await capture.addChannel(0, 'CLK')
-      await capture.addChannel(1, 'DATA')
-      await capture.removeChannel(0)
-      expect(capture.channels).toHaveLength(1)
-      expect(capture.channels[0].channelNumber).toBe(1)
     })
   })
 
@@ -268,10 +286,9 @@ describe('useCaptureStore', () => {
       const device = useDeviceStore()
       await device.connect()
 
-      const capture = useCaptureStore()
-      await capture.addChannel(0)
-      await capture.addChannel(1)
+      selectChannels(0, 1)
 
+      const capture = useCaptureStore()
       expect(capture.currentLimits).not.toBeNull()
       expect(capture.currentLimits.minPreSamples).toBe(2)
     })
@@ -285,8 +302,9 @@ describe('useCaptureStore', () => {
       const device = useDeviceStore()
       await device.connect()
 
+      selectChannels(0)
+
       const capture = useCaptureStore()
-      await capture.addChannel(0)
       expect(capture.settingsValid).toBe(true)
     })
 
@@ -307,10 +325,9 @@ describe('useCaptureStore', () => {
       const device = useDeviceStore()
       await device.connect()
 
-      const capture = useCaptureStore()
-      await capture.addChannel(0, 'CLK')
-      await capture.addChannel(1, 'DATA')
+      selectChannels(0, 1)
 
+      const capture = useCaptureStore()
       await capture.startCapture()
 
       expect(capture.capturedChannels).toHaveLength(2)
@@ -320,8 +337,9 @@ describe('useCaptureStore', () => {
     })
 
     it('sets error when not connected', async () => {
+      selectChannels(0)
+
       const capture = useCaptureStore()
-      await capture.addChannel(0)
       await capture.startCapture()
       expect(capture.captureError).toBe('Not connected')
     })

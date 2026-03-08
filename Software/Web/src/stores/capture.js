@@ -1,30 +1,37 @@
-import { ref, shallowRef, computed } from 'vue'
+import { shallowRef, computed } from 'vue'
 import { defineStore, acceptHMRUpdate } from 'pinia'
+import { useLocalStorage } from '@vueuse/core'
 import { useDeviceStore } from './device.js'
+import { useChannelConfigStore } from './channel-config.js'
 import { createChannel, getTotalSamples } from '../core/driver/types.js'
 import { createRegion } from '../core/capture/types.js'
 import { parseLac, serializeLac, parseCsv, serializeCsv } from '../core/capture/formats.js'
 import { TRIGGER_EDGE } from '../core/protocol/commands.js'
 
 export const useCaptureStore = defineStore('capture', () => {
-  // Session config (user-editable before capture)
-  const frequency = ref(1000000)
-  const preTriggerSamples = ref(100)
-  const postTriggerSamples = ref(1000)
-  const loopCount = ref(0)
-  const measureBursts = ref(false)
-  const triggerType = ref(TRIGGER_EDGE)
-  const triggerChannel = ref(0)
-  const triggerInverted = ref(false)
-  const triggerBitCount = ref(1)
-  const triggerPattern = ref(0)
-  const channels = ref([])
+  // Session config (persisted via localStorage)
+  const frequency = useLocalStorage('la-cap-frequency', 1000000)
+  const preTriggerSamples = useLocalStorage('la-cap-pre-samples', 100)
+  const postTriggerSamples = useLocalStorage('la-cap-post-samples', 1000)
+  const loopCount = useLocalStorage('la-cap-loop-count', 0)
+  const measureBursts = useLocalStorage('la-cap-measure-bursts', false)
+  const triggerType = useLocalStorage('la-cap-trigger-type', TRIGGER_EDGE)
+  const triggerChannel = useLocalStorage('la-cap-trigger-channel', 0)
+  const triggerInverted = useLocalStorage('la-cap-trigger-inverted', false)
+  const triggerBitCount = useLocalStorage('la-cap-trigger-bit-count', 1)
+  const triggerPattern = useLocalStorage('la-cap-trigger-pattern', 0)
+
+  // Channels derived from channel-config store
+  const channels = computed(() => {
+    const config = useChannelConfigStore()
+    return config.selectedChannels.map((num) => createChannel(num, config.channelNames[num]))
+  })
 
   // Capture results
   const capturedChannels = shallowRef([])
-  const bursts = ref(null)
-  const regions = ref([])
-  const captureError = ref(null)
+  const bursts = shallowRef(null)
+  const regions = shallowRef([])
+  const captureError = shallowRef(null)
 
   function buildSession() {
     return {
@@ -115,6 +122,13 @@ export const useCaptureStore = defineStore('capture', () => {
 
   async function loadLac(jsonString) {
     const { session: sess, regions: loadedRegions } = parseLac(jsonString)
+    const channelConfig = useChannelConfigStore()
+
+    // Update channel-config from file
+    channelConfig.setSelectedChannels(sess.captureChannels.map((ch) => ch.channelNumber))
+    for (const ch of sess.captureChannels) {
+      if (ch.channelName) channelConfig.setName(ch.channelNumber, ch.channelName)
+    }
 
     frequency.value = sess.frequency
     preTriggerSamples.value = sess.preTriggerSamples
@@ -126,7 +140,6 @@ export const useCaptureStore = defineStore('capture', () => {
     triggerInverted.value = sess.triggerInverted
     triggerBitCount.value = sess.triggerBitCount
     triggerPattern.value = sess.triggerPattern
-    channels.value = sess.captureChannels.map((ch) => ({ ...ch, samples: null }))
 
     capturedChannels.value = sess.captureChannels
     bursts.value = sess.bursts
@@ -136,9 +149,15 @@ export const useCaptureStore = defineStore('capture', () => {
 
   async function loadCsv(csvString) {
     const { channels: loadedChannels } = parseCsv(csvString)
+    const channelConfig = useChannelConfigStore()
+
+    // Update channel-config from loaded channels
+    channelConfig.setSelectedChannels(loadedChannels.map((ch) => ch.channelNumber))
+    for (const ch of loadedChannels) {
+      if (ch.channelName) channelConfig.setName(ch.channelNumber, ch.channelName)
+    }
 
     capturedChannels.value = loadedChannels
-    channels.value = loadedChannels.map((ch) => ({ ...ch, samples: null }))
     preTriggerSamples.value = 0
     postTriggerSamples.value = loadedChannels[0]?.samples?.length ?? 0
     loopCount.value = 0
@@ -187,14 +206,6 @@ export const useCaptureStore = defineStore('capture', () => {
     if ('triggerInverted' in partial) triggerInverted.value = partial.triggerInverted
     if ('triggerBitCount' in partial) triggerBitCount.value = partial.triggerBitCount
     if ('triggerPattern' in partial) triggerPattern.value = partial.triggerPattern
-  }
-
-  async function addChannel(number, name = '', color = null) {
-    channels.value = [...channels.value, createChannel(number, name, color)]
-  }
-
-  async function removeChannel(number) {
-    channels.value = channels.value.filter((ch) => ch.channelNumber !== number)
   }
 
   async function addRegion(firstSample, lastSample, name = '', color = undefined) {
@@ -248,8 +259,6 @@ export const useCaptureStore = defineStore('capture', () => {
     exportLac,
     exportCsv,
     updateConfig,
-    addChannel,
-    removeChannel,
     addRegion,
     removeRegion,
     toggleChannelVisibility,

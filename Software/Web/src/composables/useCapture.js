@@ -100,39 +100,6 @@ export function useCapture() {
     await capture.startCapture()
   }
 
-  function addChannel(number, name = '', color = null) {
-    capture.addChannel(number, name, color)
-  }
-
-  function removeChannel(number) {
-    capture.removeChannel(number)
-  }
-
-  function toggleChannel(number, name = '') {
-    const exists = capture.channels.find((ch) => ch.channelNumber === number)
-    if (exists) {
-      capture.removeChannel(number)
-    } else {
-      capture.addChannel(number, name)
-    }
-  }
-
-  function setAllChannels(enabled) {
-    if (enabled) {
-      const existing = new Set(capture.channels.map((ch) => ch.channelNumber))
-      for (let i = 0; i < device.channelCount; i++) {
-        if (!existing.has(i)) {
-          capture.addChannel(i)
-        }
-      }
-    } else {
-      const numbers = capture.channels.map((ch) => ch.channelNumber)
-      for (const num of numbers) {
-        capture.removeChannel(num)
-      }
-    }
-  }
-
   function toggleChannelVisibility(channelNumber) {
     capture.toggleChannelVisibility(channelNumber)
   }
@@ -198,10 +165,6 @@ export function useCapture() {
     startCapture,
     stopCapture,
     repeatCapture,
-    addChannel,
-    removeChannel,
-    toggleChannel,
-    setAllChannels,
     toggleChannelVisibility,
     clearCapture,
     clearError,

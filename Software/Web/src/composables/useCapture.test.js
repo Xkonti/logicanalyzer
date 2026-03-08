@@ -3,6 +3,27 @@ import { setActivePinia, createPinia } from 'pinia'
 import { useCapture } from './useCapture.js'
 import { useDeviceStore } from '../stores/device.js'
 import { useCaptureStore } from '../stores/capture.js'
+import { useChannelConfigStore } from '../stores/channel-config.js'
+
+function createMockStorage() {
+  const store = {}
+  return {
+    getItem: vi.fn((key) => store[key] ?? null),
+    setItem: vi.fn((key, value) => {
+      store[key] = value
+    }),
+    removeItem: vi.fn((key) => {
+      delete store[key]
+    }),
+    clear: vi.fn(() => {
+      for (const key of Object.keys(store)) delete store[key]
+    }),
+    get length() {
+      return Object.keys(store).length
+    },
+    key: vi.fn((i) => Object.keys(store)[i] ?? null),
+  }
+}
 
 vi.mock('../core/driver/analyzer.js', () => {
   class MockAnalyzerDriver {
@@ -102,8 +123,14 @@ async function connectDevice() {
   await device.connect()
 }
 
+function selectChannels(...nums) {
+  const channelConfig = useChannelConfigStore()
+  channelConfig.setSelectedChannels(nums)
+}
+
 describe('useCapture', () => {
   beforeEach(() => {
+    vi.stubGlobal('localStorage', createMockStorage())
     setActivePinia(createPinia())
   })
 
@@ -164,15 +191,15 @@ describe('useCapture', () => {
 
     it('is true when connected with valid settings', async () => {
       await connectDevice()
+      selectChannels(0)
       const cap = useCapture()
-      cap.addChannel(0)
       expect(cap.canCapture).toBe(true)
     })
 
     it('is false when capturing', async () => {
       await connectDevice()
+      selectChannels(0)
       const cap = useCapture()
-      cap.addChannel(0)
       const device = useDeviceStore()
       device.capturing = true
       expect(cap.canCapture).toBe(false)
@@ -195,47 +222,20 @@ describe('useCapture', () => {
     })
   })
 
-  describe('channel management', () => {
-    it('toggleChannel adds a channel', () => {
+  describe('channels from channel-config', () => {
+    it('reflects channel-config selection', () => {
       const cap = useCapture()
-      cap.toggleChannel(3, 'CLK')
+      selectChannels(3)
       expect(cap.channels).toHaveLength(1)
       expect(cap.channels[0].channelNumber).toBe(3)
+    })
+
+    it('reflects channel names from channel-config', () => {
+      const channelConfig = useChannelConfigStore()
+      channelConfig.setName(3, 'CLK')
+      selectChannels(3)
+      const cap = useCapture()
       expect(cap.channels[0].channelName).toBe('CLK')
-    })
-
-    it('toggleChannel removes existing channel', () => {
-      const cap = useCapture()
-      cap.addChannel(3, 'CLK')
-      expect(cap.channels).toHaveLength(1)
-      cap.toggleChannel(3)
-      expect(cap.channels).toHaveLength(0)
-    })
-
-    it('setAllChannels(true) adds all channels', async () => {
-      await connectDevice()
-      const cap = useCapture()
-      cap.setAllChannels(true)
-      expect(cap.channels).toHaveLength(24)
-    })
-
-    it('setAllChannels(false) removes all channels', async () => {
-      await connectDevice()
-      const cap = useCapture()
-      cap.addChannel(0)
-      cap.addChannel(5)
-      cap.setAllChannels(false)
-      expect(cap.channels).toHaveLength(0)
-    })
-
-    it('setAllChannels(true) does not duplicate existing', async () => {
-      await connectDevice()
-      const cap = useCapture()
-      cap.addChannel(3)
-      cap.setAllChannels(true)
-      expect(cap.channels).toHaveLength(24)
-      const ch3Count = cap.channels.filter((c) => c.channelNumber === 3).length
-      expect(ch3Count).toBe(1)
     })
   })
 
@@ -246,25 +246,22 @@ describe('useCapture', () => {
     })
 
     it('is 0 (8ch) when max channel < 8', () => {
+      selectChannels(0, 7)
       const cap = useCapture()
-      cap.addChannel(0)
-      cap.addChannel(7)
       expect(cap.captureMode).toBe(0)
       expect(cap.captureModeLabel).toBe('8 Channel')
     })
 
     it('is 1 (16ch) when max channel 8-15', () => {
+      selectChannels(0, 10)
       const cap = useCapture()
-      cap.addChannel(0)
-      cap.addChannel(10)
       expect(cap.captureMode).toBe(1)
       expect(cap.captureModeLabel).toBe('16 Channel')
     })
 
     it('is 2 (24ch) when max channel >= 16', () => {
+      selectChannels(0, 20)
       const cap = useCapture()
-      cap.addChannel(0)
-      cap.addChannel(20)
       expect(cap.captureMode).toBe(2)
       expect(cap.captureModeLabel).toBe('24 Channel')
     })
@@ -329,7 +326,7 @@ describe('useCapture', () => {
       await connectDevice()
       const cap = useCapture()
       expect(cap.currentLimits).toBeNull() // no channels yet
-      cap.addChannel(0)
+      selectChannels(0)
       expect(cap.currentLimits).not.toBeNull()
       expect(cap.currentLimits.minPreSamples).toBe(2)
     })
@@ -338,8 +335,10 @@ describe('useCapture', () => {
   describe('startCapture', () => {
     it('populates capturedChannels on success', async () => {
       await connectDevice()
+      selectChannels(0)
+      const channelConfig = useChannelConfigStore()
+      channelConfig.setName(0, 'CH0')
       const cap = useCapture()
-      cap.addChannel(0, 'CH0')
       await cap.startCapture()
       expect(cap.hasCapture).toBe(true)
       expect(cap.capturedChannels).toHaveLength(1)
@@ -347,8 +346,8 @@ describe('useCapture', () => {
     })
 
     it('sets error when not connected', async () => {
+      selectChannels(0)
       const cap = useCapture()
-      cap.addChannel(0)
       await cap.startCapture()
       expect(cap.captureError).toBe('Not connected')
     })
@@ -357,8 +356,8 @@ describe('useCapture', () => {
   describe('clearCapture', () => {
     it('resets captured data', async () => {
       await connectDevice()
+      selectChannels(0)
       const cap = useCapture()
-      cap.addChannel(0)
       await cap.startCapture()
       expect(cap.hasCapture).toBe(true)
       cap.clearCapture()
