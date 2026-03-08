@@ -1,13 +1,38 @@
 <template>
-  <q-page class="flex flex-center">
-    <img
-      alt="Quasar logo"
-      src="~assets/quasar-logo-vertical.svg"
-      style="width: 200px; height: 200px"
-    />
+  <q-page class="column">
+    <q-banner
+      v-if="!device.isWebSerialAvailable.value"
+      class="bg-warning text-dark"
+      dense
+      inline-actions
+    >
+      <template v-slot:avatar>
+        <q-icon name="warning" />
+      </template>
+      Web Serial API is not available in this browser. Use Chrome or Edge to connect to the logic
+      analyzer hardware.
+    </q-banner>
+
+    <div v-if="!hasCapture" class="col column flex-center text-grey-6">
+      <q-icon name="insights" size="64px" class="q-mb-md" />
+      <div class="text-h6">No capture loaded</div>
+      <div class="text-body2 q-mt-sm">
+        Connect a device and start a capture, or open a .lac file
+      </div>
+    </div>
+
+    <div v-else class="col relative-position">
+      <!-- Waveform canvas area (future step) -->
+    </div>
   </q-page>
 </template>
 
 <script setup>
-//
+import { computed } from 'vue'
+import { useDevice } from 'src/composables/useDevice.js'
+import { useCaptureStore } from 'src/stores/capture.js'
+
+const device = useDevice()
+const capture = useCaptureStore()
+const hasCapture = computed(() => capture.hasCapture)
 </script>
