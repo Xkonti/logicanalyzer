@@ -1,13 +1,13 @@
 <template>
   <div class="channel-labels">
     <div
-      v-for="channel in cap.capturedChannels"
+      v-for="channel in activeChannels"
       :key="channel.channelNumber"
       class="channel-label-row"
       :class="{ 'channel-hidden': channel.hidden }"
       :style="{ height: channelHeight + 'px' }"
     >
-      <div class="channel-color-dot" :style="{ backgroundColor: cap.getChannelColor(channel.channelNumber) }" />
+      <div class="channel-color-dot" :style="{ backgroundColor: getChannelColor(channel.channelNumber) }" />
       <span class="channel-name text-caption">
         {{ channel.channelName || `Ch ${channel.channelNumber}` }}
       </span>
@@ -19,14 +19,16 @@
         size="xs"
         :icon="channel.hidden ? 'visibility_off' : 'visibility'"
         :color="channel.hidden ? 'grey-7' : 'grey-4'"
-        @click="cap.toggleChannelVisibility(channel.channelNumber)"
+        @click="toggleVisibility(channel.channelNumber)"
       />
     </div>
   </div>
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useCapture } from 'src/composables/useCapture.js'
+import { usePreview } from 'src/composables/usePreview.js'
 
 defineProps({
   channelHeight: {
@@ -36,6 +38,25 @@ defineProps({
 })
 
 const cap = useCapture()
+const preview = usePreview()
+
+const activeChannels = computed(() => {
+  if (preview.isPreviewing) return preview.previewChannels
+  return cap.capturedChannels
+})
+
+function getChannelColor(channelNumber) {
+  if (preview.isPreviewing) return preview.getChannelColor(channelNumber)
+  return cap.getChannelColor(channelNumber)
+}
+
+function toggleVisibility(channelNumber) {
+  if (preview.isPreviewing) {
+    preview.toggleChannelVisibility(channelNumber)
+  } else {
+    cap.toggleChannelVisibility(channelNumber)
+  }
+}
 </script>
 
 <style scoped>

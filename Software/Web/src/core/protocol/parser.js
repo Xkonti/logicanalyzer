@@ -175,6 +175,62 @@ export async function parseCaptureData(transport, captureMode, loopCount, measur
 }
 
 /**
+ * Reads and parses one preview data packet from the transport stream.
+ * Scans for the 0xAB 0xCD marker, reads the header + data, and unpacks
+ * bit-packed samples into a 2D array.
+ *
+ * Ports ReadPreviewStream() from LogicAnalyzerDriver.cs lines 1031-1103.
+ *
+ * Packet format:
+ *   [0xAB] [0xCD] [samplesPerInterval] [channelCount] [bit-packed data...]
+ *   data size = samplesPerInterval * ceil(channelCount / 8)
+ *
+ * @param {import('../transport/types.js').ITransport} transport
+ * @param {number} channelCount - expected channel count
+ * @param {number} samplesPerInterval - expected samples per interval
+ * @returns {Promise<number[][]>} samples[sampleIdx][channelIdx] = 0|1
+ */
+export async function parsePreviewPacket(transport, channelCount, samplesPerInterval) {
+  // Scan for marker bytes 0xAB 0xCD
+  while (true) {
+    const b1 = await transport.readBytes(1)
+    if (b1[0] !== 0xab) continue
+
+    const b2 = await transport.readBytes(1)
+    if (b2[0] !== 0xcd) continue
+
+    // Read header: samplesPerInterval + channelCount
+    const header = await transport.readBytes(2)
+    const recvSpi = header[0]
+    const recvChCount = header[1]
+
+    // Read data payload
+    const bytesPerSample = Math.ceil(recvChCount / 8)
+    const dataSize = recvSpi * bytesPerSample
+    const data = await transport.readBytes(dataSize)
+
+    // Validate header matches expected values
+    if (recvSpi !== samplesPerInterval || recvChCount !== channelCount) {
+      continue // skip mismatched packet
+    }
+
+    // Unpack bit-packed samples: [sampleIdx][channelIdx] = 0|1
+    const samples = []
+    for (let s = 0; s < samplesPerInterval; s++) {
+      const row = new Array(channelCount)
+      for (let ch = 0; ch < channelCount; ch++) {
+        const byteIdx = s * bytesPerSample + Math.floor(ch / 8)
+        const bitIdx = ch % 8
+        row[ch] = (data[byteIdx] >> bitIdx) & 1
+      }
+      samples.push(row)
+    }
+
+    return samples
+  }
+}
+
+/**
  * Reads a single line and checks if it matches the expected response.
  *
  * @param {import('../transport/types.js').ITransport} transport

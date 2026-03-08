@@ -1,7 +1,9 @@
 <template>
-  <div class="waveform-viewer">
+  <div class="waveform-viewer" :class="{ 'with-led-strip': preview.isPreviewing }">
     <div class="wv-corner" />
     <TimelineRuler class="wv-timeline" />
+
+    <PreviewLedStrip v-if="preview.isPreviewing" class="wv-led-strip" />
 
     <div class="wv-channels">
       <ChannelLabels class="wv-labels" :channel-height="channelHeight" />
@@ -48,6 +50,17 @@
         color="grey-4"
         @click="viewport.fitAll()"
       />
+      <q-btn
+        v-if="preview.isPreviewing"
+        flat
+        dense
+        round
+        size="sm"
+        :icon="preview.following ? 'gps_fixed' : 'gps_not_fixed'"
+        :color="preview.following ? 'positive' : 'grey-4'"
+        title="Follow latest data"
+        @click="preview.following = !preview.following"
+      />
     </div>
   </div>
 </template>
@@ -56,13 +69,16 @@
 import { ref, computed, watch } from 'vue'
 import { useViewportStore } from 'src/stores/viewport.js'
 import { useCapture } from 'src/composables/useCapture.js'
+import { usePreview } from 'src/composables/usePreview.js'
 import { MIN_CHANNEL_HEIGHT } from 'src/core/renderer/waveform-renderer.js'
 import TimelineRuler from './TimelineRuler.vue'
 import ChannelLabels from './ChannelLabels.vue'
 import WaveformCanvas from './WaveformCanvas.vue'
+import PreviewLedStrip from 'src/components/preview/PreviewLedStrip.vue'
 
 const viewport = useViewportStore()
 const cap = useCapture()
+const preview = usePreview()
 
 const channelHeight = ref(MIN_CHANNEL_HEIGHT)
 
@@ -71,6 +87,7 @@ const scrollMax = computed(() => Math.max(0, viewport.totalSamples - viewport.vi
 const scrollStep = computed(() => Math.max(1, Math.floor(viewport.visibleSamples * 0.01)))
 
 function onScrollChange(val) {
+  if (preview.isPreviewing) preview.following = false
   viewport.setView(val, viewport.visibleSamples)
 }
 
@@ -92,6 +109,10 @@ watch(
   background: rgb(28, 28, 28);
 }
 
+.waveform-viewer.with-led-strip {
+  grid-template-rows: 32px auto 1fr auto;
+}
+
 .wv-corner {
   grid-area: 1 / 1;
   background: rgb(28, 28, 28);
@@ -104,13 +125,25 @@ watch(
   border-bottom: 1px solid rgb(60, 60, 60);
 }
 
-.wv-channels {
+.wv-led-strip {
   grid-column: 1 / -1;
   grid-row: 2;
+}
+
+.wv-channels {
+  grid-column: 1 / -1;
   display: grid;
   grid-template-columns: 160px 1fr;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+.waveform-viewer:not(.with-led-strip) .wv-channels {
+  grid-row: 2;
+}
+
+.waveform-viewer.with-led-strip .wv-channels {
+  grid-row: 3;
 }
 
 .wv-labels {
@@ -123,7 +156,6 @@ watch(
 
 .wv-controls {
   grid-column: 1 / -1;
-  grid-row: 3;
   display: flex;
   align-items: center;
   gap: 4px;

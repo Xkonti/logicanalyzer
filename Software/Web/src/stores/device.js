@@ -7,6 +7,7 @@ export const useDeviceStore = defineStore('device', () => {
   const driver = shallowRef(null)
   const connected = ref(false)
   const capturing = ref(false)
+  const previewing = ref(false)
   const deviceInfo = ref(null)
   const error = ref(null)
 
@@ -53,6 +54,7 @@ export const useDeviceStore = defineStore('device', () => {
     driver.value = null
     connected.value = false
     capturing.value = false
+    previewing.value = false
     deviceInfo.value = null
     error.value = null
   }
@@ -93,6 +95,7 @@ export const useDeviceStore = defineStore('device', () => {
     driver,
     connected,
     capturing,
+    previewing,
     deviceInfo,
     error,
     version,

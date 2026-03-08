@@ -3,17 +3,20 @@
  * Ports AnalyzerDriverBase + LogicAnalyzerDriver from SharedDriver.
  */
 
-import { OutputPacket, buildCaptureRequest } from '../protocol/packets.js'
+import { OutputPacket, buildCaptureRequest, buildPreviewRequest } from '../protocol/packets.js'
 import {
   parseInitResponse,
   parseCaptureStartResponse,
   parseCaptureData,
+  parsePreviewPacket,
   parseResponseLine,
 } from '../protocol/parser.js'
 import {
   CMD_DEVICE_INIT,
   CMD_START_CAPTURE,
   CMD_STOP_CAPTURE,
+  CMD_START_PREVIEW,
+  CMD_STOP_PREVIEW,
   CMD_ENTER_BOOTLOADER,
   CMD_BLINK_LED_ON,
   CMD_BLINK_LED_OFF,
@@ -38,6 +41,7 @@ export class AnalyzerDriver {
   #bufferSize = 0
   #channelCount = 0
   #capturing = false
+  #previewing = false
 
   get version() {
     return this.#version
@@ -66,6 +70,9 @@ export class AnalyzerDriver {
   get capturing() {
     return this.#capturing
   }
+  get previewing() {
+    return this.#previewing
+  }
   get connected() {
     return this.#transport?.connected ?? false
   }
@@ -93,6 +100,7 @@ export class AnalyzerDriver {
 
   async disconnect() {
     this.#capturing = false
+    this.#previewing = false
     if (this.#transport) {
       await this.#transport.disconnect()
     }
@@ -282,6 +290,7 @@ export class AnalyzerDriver {
    */
   async startCapture(session, onComplete) {
     if (this.#capturing) throw new Error('Already capturing')
+    if (this.#previewing) throw new Error('Preview is active')
     if (!this.#transport?.connected) throw new Error('Not connected')
     if (!session.captureChannels || session.captureChannels.length === 0) {
       onComplete?.({ success: false, session, error: 'No capture channels' })
@@ -382,5 +391,110 @@ export class AnalyzerDriver {
     pkt.addByte(CMD_ENTER_BOOTLOADER)
     await this.#transport.write(pkt.serialize())
     return parseResponseLine(this.#transport, 'RESTARTING_BOOTLOADER')
+  }
+
+  /**
+   * Starts realtime preview. Sends CMD_START_PREVIEW, reads "PREVIEW_STARTED",
+   * then launches an async read loop calling onData for each packet.
+   *
+   * Ports StartRealtimePreview from LogicAnalyzerDriver.cs lines 965-1029.
+   *
+   * @param {Object} config
+   * @param {number[]} config.channels - channel numbers to monitor
+   * @param {number} config.intervalsPerSecond - 1-60
+   * @param {number} config.samplesPerInterval - 1-16
+   * @param {(samples: number[][]) => void} onData - called for each preview packet
+   * @returns {Promise<boolean>} true if preview started successfully
+   */
+  async startPreview(config, onData) {
+    if (this.#capturing || this.#previewing) return false
+    if (!this.#transport?.connected) return false
+
+    if (!config.channels || config.channels.length === 0 || config.channels.length > 24) return false
+    if (config.intervalsPerSecond < 1 || config.intervalsPerSecond > 60) return false
+    if (config.samplesPerInterval < 1 || config.samplesPerInterval > 16) return false
+
+    try {
+      const intervalUs = Math.floor(1000000 / config.intervalsPerSecond)
+
+      const pkt = new OutputPacket()
+      pkt.addByte(CMD_START_PREVIEW)
+      pkt.addBytes(
+        buildPreviewRequest({
+          channels: config.channels,
+          intervalUs,
+          channelCount: config.channels.length,
+          samplesPerInterval: config.samplesPerInterval,
+        }),
+      )
+      await this.#transport.write(pkt.serialize())
+
+      const response = await this.#transport.readLine()
+      if (response !== 'PREVIEW_STARTED') return false
+
+      this.#previewing = true
+
+      // Fire-and-forget the read loop (don't await)
+      this.#readPreviewLoop(config.channels.length, config.samplesPerInterval, onData)
+
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Internal async loop that continuously reads preview packets.
+   * @param {number} channelCount
+   * @param {number} samplesPerInterval
+   * @param {(samples: number[][]) => void} onData
+   */
+  async #readPreviewLoop(channelCount, samplesPerInterval, onData) {
+    try {
+      while (this.#previewing) {
+        const samples = await parsePreviewPacket(this.#transport, channelCount, samplesPerInterval)
+        if (this.#previewing) {
+          onData(samples)
+        }
+      }
+    } catch {
+      // Expected when preview is stopped (transport disconnects)
+      if (this.#previewing) {
+        this.#previewing = false
+      }
+    }
+  }
+
+  /**
+   * Stops realtime preview. Signals the read loop to stop, sends CMD_STOP_PREVIEW,
+   * then disconnects and reconnects the transport.
+   *
+   * Ports StopRealtimePreview from LogicAnalyzerDriver.cs lines 1105-1157.
+   *
+   * @returns {Promise<boolean>}
+   */
+  async stopPreview() {
+    if (!this.#previewing) return false
+    this.#previewing = false
+
+    try {
+      // Wait for the read loop to notice the flag change
+      await new Promise((r) => setTimeout(r, 200))
+
+      // Send stop command
+      const pkt = new OutputPacket()
+      pkt.addByte(CMD_STOP_PREVIEW)
+      await this.#transport.write(pkt.serialize())
+
+      // Wait, then reconnect (matches C# serial close/reopen pattern)
+      await new Promise((r) => setTimeout(r, 500))
+      await this.#transport.disconnect()
+      await new Promise((r) => setTimeout(r, 1))
+      await this.#transport.connect()
+    } catch {
+      // Ignore errors during stop (matches C# catch { })
+    }
+
+    return true
   }
 }

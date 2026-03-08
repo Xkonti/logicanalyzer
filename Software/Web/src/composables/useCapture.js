@@ -58,7 +58,12 @@ export function useCapture() {
 
   // --- Convenience computed ---
   const canCapture = computed(
-    () => device.connected && !device.capturing && capture.settingsValid && capture.channels.length > 0,
+    () =>
+      device.connected &&
+      !device.capturing &&
+      !device.previewing &&
+      capture.settingsValid &&
+      capture.channels.length > 0,
   )
   const canStop = computed(() => device.connected && device.capturing)
 

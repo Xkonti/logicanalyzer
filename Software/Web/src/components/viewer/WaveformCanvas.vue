@@ -13,6 +13,7 @@ import { ref, shallowRef, watchEffect, computed, onMounted, onBeforeUnmount } fr
 import { WaveformRenderer, MIN_CHANNEL_HEIGHT } from 'src/core/renderer/waveform-renderer.js'
 import { useViewportStore } from 'src/stores/viewport.js'
 import { useCapture } from 'src/composables/useCapture.js'
+import { usePreview } from 'src/composables/usePreview.js'
 
 const emit = defineEmits(['channel-height-update'])
 
@@ -22,9 +23,15 @@ const renderer = shallowRef(null)
 
 const viewport = useViewportStore()
 const cap = useCapture()
+const preview = usePreview()
+
+const activeChannels = computed(() => {
+  if (preview.isPreviewing) return preview.previewChannels
+  return cap.capturedChannels
+})
 
 const visibleChannelCount = computed(() => {
-  return cap.capturedChannels.filter((ch) => !ch.hidden).length
+  return activeChannels.value.filter((ch) => !ch.hidden).length
 })
 
 const minCanvasHeight = computed(() => {
@@ -59,6 +66,11 @@ function mapRegions(regions) {
 
 function onWheel(event) {
   if (!renderer.value) return
+
+  // Disable follow on manual scroll/zoom during preview
+  if (preview.isPreviewing) {
+    preview.following = false
+  }
 
   if (event.ctrlKey || event.metaKey) {
     event.preventDefault()
@@ -123,11 +135,18 @@ onBeforeUnmount(() => {
 
 watchEffect(() => {
   if (!renderer.value) return
-  renderer.value.setChannels(mapChannels(cap.capturedChannels))
+  renderer.value.setChannels(mapChannels(activeChannels.value))
   renderer.value.setViewport(viewport.firstSample, viewport.visibleSamples)
-  renderer.value.setPreTriggerSamples(cap.preTriggerSamples)
-  renderer.value.setBursts(mapBursts(cap.bursts))
-  renderer.value.setRegions(mapRegions(cap.regions))
+  // Skip capture-specific markers during preview
+  if (preview.isPreviewing) {
+    renderer.value.setPreTriggerSamples(0)
+    renderer.value.setBursts([])
+    renderer.value.setRegions([])
+  } else {
+    renderer.value.setPreTriggerSamples(cap.preTriggerSamples)
+    renderer.value.setBursts(mapBursts(cap.bursts))
+    renderer.value.setRegions(mapRegions(cap.regions))
+  }
   renderer.value.resize()
   renderer.value.render()
   emit('channel-height-update', renderer.value.channelHeight)

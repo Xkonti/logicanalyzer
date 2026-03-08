@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { useCaptureStore } from './capture.js'
+import { usePreviewStore } from './preview.js'
 
 const MIN_VISIBLE_SAMPLES = 10
 const ZOOM_FACTOR = 0.5
@@ -10,9 +11,14 @@ export const useViewportStore = defineStore('viewport', () => {
   const firstSample = ref(0)
   const visibleSamples = ref(100)
 
+  function getEffectiveTotalSamples() {
+    const preview = usePreviewStore()
+    if (preview.previewing) return preview.totalSamples
+    return useCaptureStore().totalSamples
+  }
+
   function clamp(first, visible) {
-    const capture = useCaptureStore()
-    const total = capture.totalSamples
+    const total = getEffectiveTotalSamples()
     if (total === 0) return { first: 0, visible }
     const clampedVisible = Math.max(MIN_VISIBLE_SAMPLES, Math.min(visible, total))
     const clampedFirst = Math.max(0, Math.min(first, total - clampedVisible))
@@ -25,11 +31,10 @@ export const useViewportStore = defineStore('viewport', () => {
   const canZoomIn = computed(() => visibleSamples.value > MIN_VISIBLE_SAMPLES)
 
   const canZoomOut = computed(() => {
-    const capture = useCaptureStore()
-    return visibleSamples.value < capture.totalSamples
+    return visibleSamples.value < getEffectiveTotalSamples()
   })
 
-  const totalSamples = computed(() => useCaptureStore().totalSamples)
+  const totalSamples = computed(() => getEffectiveTotalSamples())
 
   // Actions
   async function setView(first, count) {
@@ -80,8 +85,7 @@ export const useViewportStore = defineStore('viewport', () => {
   }
 
   async function fitAll() {
-    const capture = useCaptureStore()
-    const total = capture.totalSamples
+    const total = getEffectiveTotalSamples()
     if (total === 0) return
     firstSample.value = 0
     visibleSamples.value = total

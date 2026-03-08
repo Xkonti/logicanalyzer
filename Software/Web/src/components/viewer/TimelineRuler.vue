@@ -5,10 +5,11 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, watchEffect, onMounted, onBeforeUnmount } from 'vue'
+import { ref, shallowRef, watchEffect, computed, onMounted, onBeforeUnmount } from 'vue'
 import { TimelineRenderer } from 'src/core/renderer/timeline-renderer.js'
 import { useViewportStore } from 'src/stores/viewport.js'
 import { useCapture } from 'src/composables/useCapture.js'
+import { usePreview } from 'src/composables/usePreview.js'
 
 const containerRef = ref(null)
 const canvasRef = ref(null)
@@ -16,6 +17,12 @@ const renderer = shallowRef(null)
 
 const viewport = useViewportStore()
 const cap = useCapture()
+const preview = usePreview()
+
+const activeFrequency = computed(() => {
+  if (preview.isPreviewing) return preview.probingFrequency
+  return cap.frequency
+})
 
 let resizeObserver = null
 let rafId = null
@@ -59,7 +66,7 @@ onBeforeUnmount(() => {
 watchEffect(() => {
   if (!renderer.value) return
   renderer.value.setViewport(viewport.firstSample, viewport.visibleSamples)
-  renderer.value.setFrequency(cap.frequency)
+  renderer.value.setFrequency(activeFrequency.value)
   renderer.value.resize()
   renderer.value.render()
 })

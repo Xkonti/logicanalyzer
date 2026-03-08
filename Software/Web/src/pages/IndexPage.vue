@@ -13,7 +13,7 @@
       analyzer hardware.
     </q-banner>
 
-    <div v-if="!cap.hasCapture" class="col column flex-center text-grey-6">
+    <div v-if="!cap.hasCapture && !preview.hasPreview" class="col column flex-center text-grey-6">
       <q-icon name="insights" size="64px" class="q-mb-md" />
       <div class="text-h6">No capture loaded</div>
       <div class="text-body2 q-mt-sm">
@@ -28,8 +28,10 @@
 <script setup>
 import { useDevice } from 'src/composables/useDevice.js'
 import { useCapture } from 'src/composables/useCapture.js'
+import { usePreview } from 'src/composables/usePreview.js'
 import WaveformViewer from 'src/components/viewer/WaveformViewer.vue'
 
 const device = useDevice()
 const cap = useCapture()
+const preview = usePreview()
 </script>
