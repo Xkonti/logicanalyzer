@@ -95,7 +95,7 @@ export const useCaptureStore = defineStore('capture', () => {
           bursts.value = result.session.bursts ?? null
           captureError.value = null
         } else {
-          captureError.value = 'Capture failed'
+          captureError.value = result.error || 'Capture failed'
         }
       })
     } catch (err) {

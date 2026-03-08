@@ -53,8 +53,16 @@ export function validateVersion(versionString) {
  * @returns {Promise<DeviceInfo>}
  */
 export async function parseInitResponse(transport) {
-  const versionLine = await transport.readLine()
-  const ver = validateVersion(versionLine)
+  // Skip any non-version lines that may remain from firmware boot noise.
+  // The drain in serial.js clears most of it, but partial chunks may linger.
+  const MAX_SKIP = 20
+  let versionLine
+  let ver
+  for (let i = 0; i < MAX_SKIP; i++) {
+    versionLine = await transport.readLine()
+    ver = validateVersion(versionLine)
+    if (ver.valid) break
+  }
   if (!ver.valid) {
     throw new Error(
       `Invalid device version "${versionLine}", minimum supported: V${MIN_MAJOR_VERSION}_${MIN_MINOR_VERSION}`,
@@ -100,11 +108,10 @@ export async function parseInitResponse(transport) {
  * Reads the capture start acknowledgment.
  *
  * @param {import('../transport/types.js').ITransport} transport
- * @returns {Promise<boolean>} true if "CAPTURE_STARTED" received
+ * @returns {Promise<string>} the response line from the device
  */
 export async function parseCaptureStartResponse(transport) {
-  const line = await transport.readLine()
-  return line === 'CAPTURE_STARTED'
+  return await transport.readLine()
 }
 
 /**

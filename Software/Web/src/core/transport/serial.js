@@ -20,6 +20,7 @@ export class SerialTransport {
   #writer = null
   #buffer = new Uint8Array(0)
   #connected = false
+  #pendingRead = null
   #options
 
   /**
@@ -129,6 +130,7 @@ export class SerialTransport {
    */
   async readLine() {
     if (!this.#connected) throw new Error('Transport not connected')
+    await this.#consumePendingRead()
 
     const decoder = new TextDecoder()
 
@@ -159,6 +161,7 @@ export class SerialTransport {
    */
   async readBytes(count) {
     if (!this.#connected) throw new Error('Transport not connected')
+    await this.#consumePendingRead()
 
     while (this.#buffer.length < count) {
       const { value, done } = await this.#reader.read()
@@ -179,17 +182,42 @@ export class SerialTransport {
     this.#buffer = merged
   }
 
+  /**
+   * Consume a pending read left over from drain, adding its data to the buffer.
+   * Must be called before any new reader.read() to avoid concurrent reads.
+   */
+  async #consumePendingRead() {
+    if (this.#pendingRead) {
+      const p = this.#pendingRead
+      this.#pendingRead = null
+      try {
+        const { value, done } = await p
+        if (!done && value) this.#appendToBuffer(value)
+      } catch {
+        // ignore — reader may have been released
+      }
+    }
+  }
+
   async #drainPendingData() {
-    // Do a single non-blocking read attempt to clear any boot messages.
-    // Use a short timeout race — if no data arrives, that's fine.
+    // Loop: read and discard all pending boot messages.
+    // When no more data arrives within the timeout, the last read() stays
+    // pending — save it so readLine/readBytes can consume it later
+    // instead of losing stream data.
     try {
-      const result = await Promise.race([
-        this.#reader.read(),
-        new Promise((r) => setTimeout(() => r({ value: null, done: false }), 100)),
-      ])
-      // Discard whatever we got — it's boot noise
-      if (result.value) {
-        // intentionally discarded
+      while (true) {
+        const readPromise = this.#reader.read()
+        const result = await Promise.race([
+          readPromise,
+          new Promise((r) => setTimeout(() => r(null), 100)),
+        ])
+        if (result === null) {
+          // Timeout — no more data to drain. Save the pending read.
+          this.#pendingRead = readPromise
+          break
+        }
+        if (!result.value || result.value.length === 0 || result.done) break
+        // Got data — discard and try for more
       }
     } catch {
       // ignore drain errors

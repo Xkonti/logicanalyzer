@@ -553,7 +553,10 @@ describe('AnalyzerDriver', () => {
 
       const onComplete = vi.fn()
       await driver.startCapture(session, onComplete)
-      expect(onComplete).toHaveBeenCalledWith({ success: false, session })
+      expect(onComplete).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, session }),
+      )
+      expect(onComplete.mock.calls[0][0].error).toBe('No capture channels')
     })
 
     it('calls onComplete with success=false for invalid settings', async () => {
@@ -575,7 +578,10 @@ describe('AnalyzerDriver', () => {
 
       const onComplete = vi.fn()
       await driver.startCapture(session, onComplete)
-      expect(onComplete).toHaveBeenCalledWith({ success: false, session })
+      expect(onComplete).toHaveBeenCalledWith(
+        expect.objectContaining({ success: false, session }),
+      )
+      expect(onComplete.mock.calls[0][0].error).toBe('Invalid capture settings')
     })
 
     it('throws if already capturing', async () => {

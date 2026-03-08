@@ -82,12 +82,29 @@ describe('parseInitResponse', () => {
   })
 
   it('throws on invalid version line', async () => {
-    const lines = makeValidLines()
-    lines[0] = 'GARBAGE'
+    const lines = Array(20).fill('GARBAGE')
     const transport = createMockTransport({ lines })
     await transport.connect()
 
     await expect(parseInitResponse(transport)).rejects.toThrow(/Invalid device version/)
+  })
+
+  it('skips non-version lines before a valid version', async () => {
+    const lines = [
+      'FREQ:100000000',
+      'BLASTFREQ:200000000',
+      'ANALYZER_V6_5',
+      'FREQ:100000000',
+      'BLASTFREQ:200000000',
+      'BUFFER:262144',
+      'CHANNELS:24',
+    ]
+    const transport = createMockTransport({ lines })
+    await transport.connect()
+
+    const info = await parseInitResponse(transport)
+    expect(info.version).toBe('ANALYZER_V6_5')
+    expect(info.maxFrequency).toBe(100000000)
   })
 
   it('throws on invalid FREQ line', async () => {
@@ -139,16 +156,16 @@ describe('parseInitResponse', () => {
 })
 
 describe('parseCaptureStartResponse', () => {
-  it('returns true for CAPTURE_STARTED', async () => {
+  it('returns the response line from device', async () => {
     const transport = createMockTransport({ lines: ['CAPTURE_STARTED'] })
     await transport.connect()
-    expect(await parseCaptureStartResponse(transport)).toBe(true)
+    expect(await parseCaptureStartResponse(transport)).toBe('CAPTURE_STARTED')
   })
 
-  it('returns false for unexpected response', async () => {
+  it('returns unexpected response as-is', async () => {
     const transport = createMockTransport({ lines: ['ERROR'] })
     await transport.connect()
-    expect(await parseCaptureStartResponse(transport)).toBe(false)
+    expect(await parseCaptureStartResponse(transport)).toBe('ERROR')
   })
 })
 

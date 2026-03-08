@@ -59,8 +59,13 @@ export class OutputPacket {
 }
 
 /**
- * Builds the 54-byte CaptureRequest struct in little-endian format.
- * Ports CaptureRequest from AnalyzerDriverBase.cs lines 171-187.
+ * Builds the 56-byte CaptureRequest struct in little-endian format.
+ * Matches the C struct layout with default alignment padding:
+ *   offset 3: 1 byte padding before uint16_t triggerValue
+ *   offset 39: 1 byte padding before uint32_t frequency
+ *
+ * Ports CaptureRequest from AnalyzerDriverBase.cs lines 171-187
+ * and Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h.
  *
  * @param {Object} session
  * @param {number} session.triggerType - 0=Edge, 1=Complex, 2=Fast, 3=Blast
@@ -75,30 +80,32 @@ export class OutputPacket {
  * @param {number} session.loopCount
  * @param {number} session.measure - 0 or 1
  * @param {number} session.captureMode - 0=8ch, 1=16ch, 2=24ch
- * @returns {Uint8Array} exactly 54 bytes
+ * @returns {Uint8Array} exactly 56 bytes
  */
 export function buildCaptureRequest(session) {
-  const buffer = new ArrayBuffer(54)
+  const buffer = new ArrayBuffer(56)
   const view = new DataView(buffer)
 
   view.setUint8(0, session.triggerType)
   view.setUint8(1, session.triggerChannel)
   view.setUint8(2, session.invertedOrCount)
-  view.setUint16(3, session.triggerValue, true) // little-endian
+  // offset 3: alignment padding (already zero)
+  view.setUint16(4, session.triggerValue, true) // little-endian
 
-  // channels: 32-byte zero-padded array at offset 5
+  // channels: 32-byte zero-padded array at offset 6
   const bytes = new Uint8Array(buffer)
   for (let i = 0; i < Math.min(session.channels.length, 32); i++) {
-    bytes[5 + i] = session.channels[i]
+    bytes[6 + i] = session.channels[i]
   }
 
-  view.setUint8(37, session.channelCount)
-  view.setUint32(38, session.frequency, true)
-  view.setUint32(42, session.preSamples, true)
-  view.setUint32(46, session.postSamples, true)
-  view.setUint16(50, session.loopCount, true)
-  view.setUint8(52, session.measure)
-  view.setUint8(53, session.captureMode)
+  view.setUint8(38, session.channelCount)
+  // offset 39: alignment padding (already zero)
+  view.setUint32(40, session.frequency, true)
+  view.setUint32(44, session.preSamples, true)
+  view.setUint32(48, session.postSamples, true)
+  view.setUint16(52, session.loopCount, true)
+  view.setUint8(54, session.measure)
+  view.setUint8(55, session.captureMode)
 
   return new Uint8Array(buffer)
 }

@@ -284,12 +284,12 @@ export class AnalyzerDriver {
     if (this.#capturing) throw new Error('Already capturing')
     if (!this.#transport?.connected) throw new Error('Not connected')
     if (!session.captureChannels || session.captureChannels.length === 0) {
-      onComplete?.({ success: false, session })
+      onComplete?.({ success: false, session, error: 'No capture channels' })
       return
     }
 
     if (!this.validateSettings(session)) {
-      onComplete?.({ success: false, session })
+      onComplete?.({ success: false, session, error: 'Invalid capture settings' })
       return
     }
 
@@ -302,9 +302,13 @@ export class AnalyzerDriver {
       pkt.addBytes(buildCaptureRequest(request))
       await this.#transport.write(pkt.serialize())
 
-      const started = await parseCaptureStartResponse(this.#transport)
-      if (!started) {
-        onComplete?.({ success: false, session })
+      const response = await parseCaptureStartResponse(this.#transport)
+      if (response !== 'CAPTURE_STARTED') {
+        onComplete?.({
+          success: false,
+          session,
+          error: `Device responded "${response}" instead of CAPTURE_STARTED`,
+        })
         return
       }
 
@@ -329,9 +333,9 @@ export class AnalyzerDriver {
 
       this.#capturing = false
       onComplete?.({ success: true, session })
-    } catch {
+    } catch (err) {
       this.#capturing = false
-      onComplete?.({ success: false, session })
+      onComplete?.({ success: false, session, error: err?.message ?? String(err) })
     }
   }
 

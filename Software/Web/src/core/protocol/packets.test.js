@@ -114,9 +114,9 @@ describe('buildCaptureRequest', () => {
     }
   }
 
-  it('produces exactly 54 bytes', () => {
+  it('produces exactly 56 bytes (matching C struct with alignment padding)', () => {
     const result = buildCaptureRequest(makeSession())
-    expect(result.length).toBe(54)
+    expect(result.length).toBe(56)
   })
 
   it('encodes triggerType at offset 0', () => {
@@ -134,69 +134,79 @@ describe('buildCaptureRequest', () => {
     expect(buildCaptureRequest(makeSession({ invertedOrCount: 1 }))[2]).toBe(1)
   })
 
-  it('encodes triggerValue as little-endian uint16 at offset 3', () => {
-    const result = buildCaptureRequest(makeSession({ triggerValue: 0x1234 }))
-    expect(result[3]).toBe(0x34) // low byte
-    expect(result[4]).toBe(0x12) // high byte
+  it('has padding byte at offset 3', () => {
+    const result = buildCaptureRequest(makeSession())
+    expect(result[3]).toBe(0)
   })
 
-  it('encodes channels as zero-padded 32-byte array at offset 5', () => {
+  it('encodes triggerValue as little-endian uint16 at offset 4', () => {
+    const result = buildCaptureRequest(makeSession({ triggerValue: 0x1234 }))
+    expect(result[4]).toBe(0x34) // low byte
+    expect(result[5]).toBe(0x12) // high byte
+  })
+
+  it('encodes channels as zero-padded 32-byte array at offset 6', () => {
     const result = buildCaptureRequest(makeSession({ channels: [0, 1, 2] }))
-    expect(result[5]).toBe(0)
-    expect(result[6]).toBe(1)
-    expect(result[7]).toBe(2)
+    expect(result[6]).toBe(0)
+    expect(result[7]).toBe(1)
+    expect(result[8]).toBe(2)
     // remaining should be zero
-    for (let i = 8; i < 37; i++) {
+    for (let i = 9; i < 38; i++) {
       expect(result[i]).toBe(0)
     }
   })
 
-  it('encodes channelCount at offset 37', () => {
-    expect(buildCaptureRequest(makeSession({ channelCount: 8 }))[37]).toBe(8)
+  it('encodes channelCount at offset 38', () => {
+    expect(buildCaptureRequest(makeSession({ channelCount: 8 }))[38]).toBe(8)
   })
 
-  it('encodes frequency as little-endian uint32 at offset 38', () => {
+  it('has padding byte at offset 39', () => {
+    const result = buildCaptureRequest(makeSession())
+    expect(result[39]).toBe(0)
+  })
+
+  it('encodes frequency as little-endian uint32 at offset 40', () => {
     // 1000000 = 0x000F4240
     const result = buildCaptureRequest(makeSession({ frequency: 1000000 }))
-    expect(result[38]).toBe(0x40) // lowest byte
-    expect(result[39]).toBe(0x42)
-    expect(result[40]).toBe(0x0f)
-    expect(result[41]).toBe(0x00) // highest byte
+    expect(result[40]).toBe(0x40) // lowest byte
+    expect(result[41]).toBe(0x42)
+    expect(result[42]).toBe(0x0f)
+    expect(result[43]).toBe(0x00) // highest byte
   })
 
-  it('encodes preSamples as little-endian uint32 at offset 42', () => {
+  it('encodes preSamples as little-endian uint32 at offset 44', () => {
     // 256 = 0x00000100
     const result = buildCaptureRequest(makeSession({ preSamples: 256 }))
-    expect(result[42]).toBe(0x00)
-    expect(result[43]).toBe(0x01)
     expect(result[44]).toBe(0x00)
-    expect(result[45]).toBe(0x00)
+    expect(result[45]).toBe(0x01)
+    expect(result[46]).toBe(0x00)
+    expect(result[47]).toBe(0x00)
   })
 
-  it('encodes postSamples as little-endian uint32 at offset 46', () => {
+  it('encodes postSamples as little-endian uint32 at offset 48', () => {
     // 1024 = 0x00000400
     const result = buildCaptureRequest(makeSession({ postSamples: 1024 }))
-    expect(result[46]).toBe(0x00)
-    expect(result[47]).toBe(0x04)
     expect(result[48]).toBe(0x00)
-    expect(result[49]).toBe(0x00)
+    expect(result[49]).toBe(0x04)
+    expect(result[50]).toBe(0x00)
+    expect(result[51]).toBe(0x00)
   })
 
-  it('encodes loopCount as little-endian uint16 at offset 50', () => {
+  it('encodes loopCount as little-endian uint16 at offset 52', () => {
     const result = buildCaptureRequest(makeSession({ loopCount: 300 }))
-    expect(result[50]).toBe(0x2c) // 300 & 0xFF
-    expect(result[51]).toBe(0x01) // 300 >> 8
+    expect(result[52]).toBe(0x2c) // 300 & 0xFF
+    expect(result[53]).toBe(0x01) // 300 >> 8
   })
 
-  it('encodes measure at offset 52', () => {
-    expect(buildCaptureRequest(makeSession({ measure: 1 }))[52]).toBe(1)
-    expect(buildCaptureRequest(makeSession({ measure: 0 }))[52]).toBe(0)
+  it('encodes measure at offset 54', () => {
+    expect(buildCaptureRequest(makeSession({ measure: 1 }))[54]).toBe(1)
+    expect(buildCaptureRequest(makeSession({ measure: 0 }))[54]).toBe(0)
   })
 
-  it('encodes captureMode at offset 53', () => {
-    expect(buildCaptureRequest(makeSession({ captureMode: 0 }))[53]).toBe(0)
-    expect(buildCaptureRequest(makeSession({ captureMode: 1 }))[53]).toBe(1)
-    expect(buildCaptureRequest(makeSession({ captureMode: 2 }))[53]).toBe(2)
+  it('encodes captureMode at offset 55', () => {
+    expect(buildCaptureRequest(makeSession({ captureMode: 0 }))[55]).toBe(0)
+    expect(buildCaptureRequest(makeSession({ captureMode: 1 }))[55]).toBe(1)
+    expect(buildCaptureRequest(makeSession({ captureMode: 2 }))[55]).toBe(2)
   })
 
   it('full round-trip: OutputPacket wrapping a CaptureRequest', () => {
