@@ -1,7 +1,7 @@
 <template>
   <div class="connection-panel row items-center no-wrap q-gutter-x-sm">
     <q-chip
-      v-if="!device.isWebSerialAvailable.value"
+      v-if="!device.isWebSerialAvailable"
       color="warning"
       text-color="dark"
       icon="warning"
@@ -11,9 +11,9 @@
     </q-chip>
 
     <q-btn
-      v-if="!device.isConnected.value"
-      :loading="device.connecting.value"
-      :disable="!device.isWebSerialAvailable.value"
+      v-if="!device.isConnected"
+      :loading="device.connecting"
+      :disable="!device.isWebSerialAvailable"
       color="positive"
       label="Connect"
       icon="usb"
@@ -24,21 +24,21 @@
 
     <template v-else>
       <q-chip color="positive" text-color="white" icon="check_circle" clickable dense>
-        {{ device.deviceVersion.value }}
+        {{ device.deviceVersion }}
         <q-menu anchor="bottom middle" self="top middle">
           <q-card flat bordered class="q-pa-sm">
             <q-list dense>
               <q-item>
                 <q-item-section>Channels</q-item-section>
-                <q-item-section side>{{ device.channelCount.value }}</q-item-section>
+                <q-item-section side>{{ device.channelCount }}</q-item-section>
               </q-item>
               <q-item>
                 <q-item-section>Max Frequency</q-item-section>
-                <q-item-section side>{{ formatFrequency(device.maxFrequency.value) }}</q-item-section>
+                <q-item-section side>{{ formatFrequency(device.maxFrequency) }}</q-item-section>
               </q-item>
               <q-item>
                 <q-item-section>Buffer Size</q-item-section>
-                <q-item-section side>{{ formatBytes(device.bufferSize.value) }}</q-item-section>
+                <q-item-section side>{{ formatBytes(device.bufferSize) }}</q-item-section>
               </q-item>
             </q-list>
           </q-card>
@@ -56,7 +56,7 @@
     </template>
 
     <q-chip
-      v-if="device.error.value"
+      v-if="device.error"
       color="negative"
       text-color="white"
       icon="error"
@@ -64,7 +64,7 @@
       dense
       @remove="device.clearError()"
     >
-      {{ device.error.value }}
+      {{ device.error }}
     </q-chip>
   </div>
 </template>

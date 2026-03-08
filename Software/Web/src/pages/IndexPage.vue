@@ -1,7 +1,7 @@
 <template>
   <q-page class="column">
     <q-banner
-      v-if="!device.isWebSerialAvailable.value"
+      v-if="!device.isWebSerialAvailable"
       class="bg-warning text-dark"
       dense
       inline-actions
@@ -13,7 +13,7 @@
       analyzer hardware.
     </q-banner>
 
-    <div v-if="!hasCapture" class="col column flex-center text-grey-6">
+    <div v-if="!capture.hasCapture" class="col column flex-center text-grey-6">
       <q-icon name="insights" size="64px" class="q-mb-md" />
       <div class="text-h6">No capture loaded</div>
       <div class="text-body2 q-mt-sm">
@@ -28,11 +28,9 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
 import { useDevice } from 'src/composables/useDevice.js'
 import { useCaptureStore } from 'src/stores/capture.js'
 
 const device = useDevice()
 const capture = useCaptureStore()
-const hasCapture = computed(() => capture.hasCapture)
 </script>

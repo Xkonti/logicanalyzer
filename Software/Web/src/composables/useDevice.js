@@ -1,4 +1,4 @@
-import { ref, computed } from 'vue'
+import { ref, computed, reactive } from 'vue'
 import { useDeviceStore } from '../stores/device.js'
 import { webSerialAvailable } from '../boot/webserial.js'
 
@@ -46,7 +46,7 @@ export function useDevice() {
     return await store.enterBootloader()
   }
 
-  return {
+  return reactive({
     isWebSerialAvailable,
     isConnected,
     isCapturing,
@@ -63,5 +63,5 @@ export function useDevice() {
     blinkLed,
     stopBlinkLed,
     enterBootloader,
-  }
+  })
 }

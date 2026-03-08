@@ -66,25 +66,25 @@ describe('useDevice', () => {
 
   it('reflects initial disconnected state', () => {
     const device = useDevice()
-    expect(device.isConnected.value).toBe(false)
-    expect(device.isCapturing.value).toBe(false)
-    expect(device.connecting.value).toBe(false)
-    expect(device.deviceInfo.value).toBeNull()
-    expect(device.error.value).toBeNull()
-    expect(device.deviceVersion.value).toBeNull()
-    expect(device.channelCount.value).toBe(0)
-    expect(device.maxFrequency.value).toBe(0)
-    expect(device.bufferSize.value).toBe(0)
+    expect(device.isConnected).toBe(false)
+    expect(device.isCapturing).toBe(false)
+    expect(device.connecting).toBe(false)
+    expect(device.deviceInfo).toBeNull()
+    expect(device.error).toBeNull()
+    expect(device.deviceVersion).toBeNull()
+    expect(device.channelCount).toBe(0)
+    expect(device.maxFrequency).toBe(0)
+    expect(device.bufferSize).toBe(0)
   })
 
   it('reflects isWebSerialAvailable from boot ref', async () => {
     const { webSerialAvailable } = await import('../boot/webserial.js')
     webSerialAvailable.value = true
     const device = useDevice()
-    expect(device.isWebSerialAvailable.value).toBe(true)
+    expect(device.isWebSerialAvailable).toBe(true)
 
     webSerialAvailable.value = false
-    expect(device.isWebSerialAvailable.value).toBe(false)
+    expect(device.isWebSerialAvailable).toBe(false)
 
     webSerialAvailable.value = true
   })
@@ -92,14 +92,14 @@ describe('useDevice', () => {
   describe('connect', () => {
     it('delegates to store and manages connecting state', async () => {
       const device = useDevice()
-      expect(device.connecting.value).toBe(false)
+      expect(device.connecting).toBe(false)
 
       const promise = device.connect()
-      expect(device.connecting.value).toBe(true)
+      expect(device.connecting).toBe(true)
 
       await promise
-      expect(device.connecting.value).toBe(false)
-      expect(device.isConnected.value).toBe(true)
+      expect(device.connecting).toBe(false)
+      expect(device.isConnected).toBe(true)
     })
 
     it('sets connecting to false even on error', async () => {
@@ -111,8 +111,8 @@ describe('useDevice', () => {
 
       const device = useDevice()
       await device.connect()
-      expect(device.connecting.value).toBe(false)
-      expect(device.error.value).toBe('Port not found')
+      expect(device.connecting).toBe(false)
+      expect(device.error).toBe('Port not found')
 
       SerialTransport.prototype.connect = origConnect
     })
@@ -121,10 +121,10 @@ describe('useDevice', () => {
       const device = useDevice()
       await device.connect()
 
-      expect(device.deviceVersion.value).toBe('ANALYZER_V6_5')
-      expect(device.channelCount.value).toBe(24)
-      expect(device.maxFrequency.value).toBe(100000000)
-      expect(device.bufferSize.value).toBe(262144)
+      expect(device.deviceVersion).toBe('ANALYZER_V6_5')
+      expect(device.channelCount).toBe(24)
+      expect(device.maxFrequency).toBe(100000000)
+      expect(device.bufferSize).toBe(262144)
     })
   })
 
@@ -132,10 +132,10 @@ describe('useDevice', () => {
     it('delegates to store', async () => {
       const device = useDevice()
       await device.connect()
-      expect(device.isConnected.value).toBe(true)
+      expect(device.isConnected).toBe(true)
 
       await device.disconnect()
-      expect(device.isConnected.value).toBe(false)
+      expect(device.isConnected).toBe(false)
     })
   })
 
@@ -149,10 +149,10 @@ describe('useDevice', () => {
 
       const device = useDevice()
       await device.connect()
-      expect(device.error.value).toBe('Something went wrong')
+      expect(device.error).toBe('Something went wrong')
 
       device.clearError()
-      expect(device.error.value).toBeNull()
+      expect(device.error).toBeNull()
 
       SerialTransport.prototype.connect = origConnect
     })
@@ -178,7 +178,7 @@ describe('useDevice', () => {
       await device.connect()
       const result = await device.enterBootloader()
       expect(result).toBe(true)
-      expect(device.isConnected.value).toBe(false)
+      expect(device.isConnected).toBe(false)
     })
   })
 })
