@@ -197,8 +197,8 @@ interface ITransport {
 
   // Raw byte I/O — matches what the protocol layer needs
   write(data: Uint8Array): Promise<void>
-  readLine(): Promise<string>                    // For text handshake phase
-  readBytes(count: number): Promise<Uint8Array>  // For binary phase
+  readLine(): Promise<string> // For text handshake phase
+  readBytes(count: number): Promise<Uint8Array> // For binary phase
   readUntilIdle(timeoutMs: number): Promise<Uint8Array> // For capture dumps
 
   onDisconnect: (() => void) | null
@@ -279,7 +279,7 @@ interface AnalyzerChannel {
   channelName: string
   channelColor: string // hex color
   visible: boolean
-  samples: Uint8Array  // 0=low, 1=high per sample
+  samples: Uint8Array // 0=low, 1=high per sample
 }
 
 interface SampleRegion {
@@ -367,8 +367,8 @@ interface IDecoder {
 
 The stores mirror the feature groups from the desktop app but are properly decoupled:
 
-| Store      | Owns                                              | Reads from              |
-| ---------- | ------------------------------------------------- | ----------------------- |
+| Store      | Owns                                               | Reads from              |
+| ---------- | -------------------------------------------------- | ----------------------- |
 | `device`   | connection state, device info, driver instance ref | —                       |
 | `capture`  | session config, channel data, burst info           | `device` (limits)       |
 | `viewport` | firstSample, visibleSamples, zoom level            | `capture` (total count) |
@@ -386,14 +386,14 @@ Each store is independently testable and only talks to other stores through Pini
 
 The Web Serial API maps almost 1:1 to the existing `SharedDriver/LogicAnalyzerDriver.cs`:
 
-| Desktop (C#)                  | Web (JS)                                                                  |
-| ----------------------------- | ------------------------------------------------------------------------- |
-| `SerialPort(port, 115200)`    | `port.open({ baudRate: 115200, bufferSize: 1048576 })`                    |
-| VID:1209 / PID:3020 filter    | `requestPort({ filters: [{ usbVendorId: 0x1209, usbProductId: 0x3020 }] })` |
-| `sp.RtsEnable = true`         | `port.setSignals({ requestToSend: true })`                                |
-| `readResponse.ReadLine()`     | `TransformStream` line buffer (~30 lines of JS)                           |
-| `readData.ReadBytes(n)`       | `reader.read()` accumulate into `Uint8Array`                              |
-| `OutputPacket.Serialize()`    | Port byte-stuffing logic to JS (~50 lines)                                |
+| Desktop (C#)               | Web (JS)                                                                    |
+| -------------------------- | --------------------------------------------------------------------------- |
+| `SerialPort(port, 115200)` | `port.open({ baudRate: 115200, bufferSize: 1048576 })`                      |
+| VID:1209 / PID:3020 filter | `requestPort({ filters: [{ usbVendorId: 0x1209, usbProductId: 0x3020 }] })` |
+| `sp.RtsEnable = true`      | `port.setSignals({ requestToSend: true })`                                  |
+| `readResponse.ReadLine()`  | `TransformStream` line buffer (~30 lines of JS)                             |
+| `readData.ReadBytes(n)`    | `reader.read()` accumulate into `Uint8Array`                                |
+| `OutputPacket.Serialize()` | Port byte-stuffing logic to JS (~50 lines)                                  |
 
 **Key gotcha:** The default Web Serial `bufferSize` is 255 bytes. Must be set to 1MB+ (`1048576`) or capture data will overflow.
 
@@ -542,23 +542,23 @@ Requires a ~300-line TypeScript shim implementing the ScanaStudio API:
 **Input API (shim provides):**
 
 ```typescript
-trs_get_first(ch)                          // first transition on channel
-trs_get_next(ch)                           // next transition
-trs_is_not_last(ch)                        // check if more transitions
-bit_sampler_ini(ch, offset, period)        // initialize bit sampling
-bit_sampler_next(ch)                       // sample next bit
-get_sample_rate()                          // returns sample rate in Hz
+trs_get_first(ch) // first transition on channel
+trs_get_next(ch) // next transition
+trs_is_not_last(ch) // check if more transitions
+bit_sampler_ini(ch, offset, period) // initialize bit sampling
+bit_sampler_next(ch) // sample next bit
+get_sample_rate() // returns sample rate in Hz
 ```
 
 **Output API (shim collects):**
 
 ```typescript
-dec_item_new(ch, start, end)               // create annotated span
-dec_item_add_pre_text(text)                // display label
-dec_item_add_comment(text)                 // tooltip text
-dec_item_add_data(value)                   // decoded value
-pkt_start(name) / pkt_end()               // packet boundaries
-hex_add_byte(ch, start, end, value)        // hex view entry
+dec_item_new(ch, start, end) // create annotated span
+dec_item_add_pre_text(text) // display label
+dec_item_add_comment(text) // tooltip text
+dec_item_add_data(value) // decoded value
+pkt_start(name) / pkt_end() // packet boundaries
+hex_add_byte(ch, start, end, value) // hex view entry
 ```
 
 **Advantages:** Zero startup overhead, native JS performance, no Python runtime download.
@@ -604,12 +604,12 @@ Use [browser-fs-access](https://github.com/GoogleChromeLabs/browser-fs-access) (
 
 The desktop app stores settings in `%APPDATA%/LogicAnalyzer/` as JSON files. The web port uses:
 
-| Desktop file                     | Web equivalent               |
-| -------------------------------- | ---------------------------- |
-| `cpSettings{type}.json`          | `localStorage` (small JSON)  |
-| `profiles.json`                  | `IndexedDB` (larger data)    |
-| `knownDevices.json`              | Not needed (no multi-device) |
-| Window position/size             | Not applicable               |
+| Desktop file            | Web equivalent               |
+| ----------------------- | ---------------------------- |
+| `cpSettings{type}.json` | `localStorage` (small JSON)  |
+| `profiles.json`         | `IndexedDB` (larger data)    |
+| `knownDevices.json`     | Not needed (no multi-device) |
+| Window position/size    | Not applicable               |
 
 The `settings` Pinia store handles serialization to/from `localStorage` with a `watch()` for automatic persistence.
 
@@ -632,15 +632,15 @@ graph LR
     P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
 ```
 
-| Phase                      | Delivers                                                     | Core modules                           | Components                                                    |
-| -------------------------- | ------------------------------------------------------------ | -------------------------------------- | ------------------------------------------------------------- |
-| **1. File viewer**         | Open .lac/.csv files, display waveforms, zoom/scroll         | `capture/formats`, `renderer/*`        | `WaveformCanvas`, `TimelineRuler`, `ChannelList`              |
-| **2. USB capture**         | Connect to Pico via USB, configure & run captures            | `transport/serial`, `protocol/*`, `driver/*` | `ConnectionPanel`, `CapturePanel`, `CaptureToolbar`     |
-| **3. Markers & measurement** | Regions, user marker, timing measurements                 | `capture/editing`                      | `MarkerOverlay`, `MeasurePanel`                               |
-| **4. Protocol decoders**   | I2C/SPI/UART/CAN decode + annotation display                | `decoders/*`, `workers/decoder`        | `DecoderPanel`, `AnnotationOverlay`                           |
-| **5. WiFi connectivity**   | Connect via WebSocket (requires firmware change)             | `transport/websocket`                  | `NetworkConfigDialog`                                         |
-| **6. Realtime preview**    | Live signal preview before triggering                        | extend `driver/analyzer`               | `SamplePreviewer`                                             |
-| **7. Profiles & polish**   | Save/load capture+decoder profiles, settings persistence     | `settings` store expansion             | Profile management UI                                         |
+| Phase                        | Delivers                                                 | Core modules                                 | Components                                          |
+| ---------------------------- | -------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------- |
+| **1. File viewer**           | Open .lac/.csv files, display waveforms, zoom/scroll     | `capture/formats`, `renderer/*`              | `WaveformCanvas`, `TimelineRuler`, `ChannelList`    |
+| **2. USB capture**           | Connect to Pico via USB, configure & run captures        | `transport/serial`, `protocol/*`, `driver/*` | `ConnectionPanel`, `CapturePanel`, `CaptureToolbar` |
+| **3. Markers & measurement** | Regions, user marker, timing measurements                | `capture/editing`                            | `MarkerOverlay`, `MeasurePanel`                     |
+| **4. Protocol decoders**     | I2C/SPI/UART/CAN decode + annotation display             | `decoders/*`, `workers/decoder`              | `DecoderPanel`, `AnnotationOverlay`                 |
+| **5. WiFi connectivity**     | Connect via WebSocket (requires firmware change)         | `transport/websocket`                        | `NetworkConfigDialog`                               |
+| **6. Realtime preview**      | Live signal preview before triggering                    | extend `driver/analyzer`                     | `SamplePreviewer`                                   |
+| **7. Profiles & polish**     | Save/load capture+decoder profiles, settings persistence | `settings` store expansion                   | Profile management UI                               |
 
 **Phase 1 is the critical proof-of-concept** — it requires no hardware at all. Anyone can open an existing `.lac` file in Chrome and view waveforms. This validates the rendering engine and the basic UI shell before touching any device communication code.
 
@@ -660,16 +660,16 @@ graph LR
 
 These are the source files in the existing desktop app that each web module maps to:
 
-| Web module           | Desktop source                                                                           |
-| -------------------- | ---------------------------------------------------------------------------------------- |
-| `core/transport/`    | `SharedDriver/LogicAnalyzerDriver.cs` (serial/network connection logic)                  |
-| `core/protocol/`     | `SharedDriver/LogicAnalyzerDriver.cs` (OutputPacket, ReadCapture, byte stuffing)         |
-| `core/driver/`       | `SharedDriver/AnalyzerDriverBase.cs`, `LogicAnalyzerDriver.cs`, `CaptureSession.cs`     |
-| `core/capture/`      | `SharedDriver/AnalyzerChannel.cs`, `LogicAnalyzer/Classes/ExportedCapture.cs`            |
-| `core/decoders/`     | `LogicAnalyzer/SigrokDecoderBridge/SigrokDecoderBase.cs`, `SigrokProvider.cs`            |
-| `core/renderer/`     | `LogicAnalyzer/Controls/SampleViewer.axaml.cs`                                           |
-| `stores/device`      | `LogicAnalyzer/MainWindow.axaml.cs` (driver field, connection state)                     |
-| `stores/capture`     | `LogicAnalyzer/MainWindow.axaml.cs` (session field, channel data)                        |
-| `stores/viewport`    | `LogicAnalyzer/MainWindow.axaml.cs` (FirstSample, VisibleSamples, ISampleDisplay sync)   |
-| `stores/markers`     | `LogicAnalyzer/Controls/SampleMarker.axaml.cs` (regions, user marker, clipboard)         |
-| `stores/settings`    | `LogicAnalyzer/Classes/AppSettingsManager.cs`                                            |
+| Web module        | Desktop source                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------- |
+| `core/transport/` | `SharedDriver/LogicAnalyzerDriver.cs` (serial/network connection logic)                |
+| `core/protocol/`  | `SharedDriver/LogicAnalyzerDriver.cs` (OutputPacket, ReadCapture, byte stuffing)       |
+| `core/driver/`    | `SharedDriver/AnalyzerDriverBase.cs`, `LogicAnalyzerDriver.cs`, `CaptureSession.cs`    |
+| `core/capture/`   | `SharedDriver/AnalyzerChannel.cs`, `LogicAnalyzer/Classes/ExportedCapture.cs`          |
+| `core/decoders/`  | `LogicAnalyzer/SigrokDecoderBridge/SigrokDecoderBase.cs`, `SigrokProvider.cs`          |
+| `core/renderer/`  | `LogicAnalyzer/Controls/SampleViewer.axaml.cs`                                         |
+| `stores/device`   | `LogicAnalyzer/MainWindow.axaml.cs` (driver field, connection state)                   |
+| `stores/capture`  | `LogicAnalyzer/MainWindow.axaml.cs` (session field, channel data)                      |
+| `stores/viewport` | `LogicAnalyzer/MainWindow.axaml.cs` (FirstSample, VisibleSamples, ISampleDisplay sync) |
+| `stores/markers`  | `LogicAnalyzer/Controls/SampleMarker.axaml.cs` (regions, user marker, clipboard)       |
+| `stores/settings` | `LogicAnalyzer/Classes/AppSettingsManager.cs`                                          |
