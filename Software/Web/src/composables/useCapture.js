@@ -41,6 +41,7 @@ export function useCapture() {
   // --- Results ---
   const capturedChannels = computed(() => capture.capturedChannels)
   const bursts = computed(() => capture.bursts)
+  const regions = computed(() => capture.regions)
   const captureError = computed(() => capture.captureError)
   const hasCapture = computed(() => capture.hasCapture)
   const totalSamples = computed(() => capture.totalSamples)
@@ -127,6 +128,10 @@ export function useCapture() {
     }
   }
 
+  function toggleChannelVisibility(channelNumber) {
+    capture.toggleChannelVisibility(channelNumber)
+  }
+
   function clearCapture() {
     capture.clearCapture()
   }
@@ -158,6 +163,7 @@ export function useCapture() {
     // Results
     capturedChannels,
     bursts,
+    regions,
     captureError,
     hasCapture,
     totalSamples,
@@ -191,6 +197,7 @@ export function useCapture() {
     removeChannel,
     toggleChannel,
     setAllChannels,
+    toggleChannelVisibility,
     clearCapture,
     clearError,
     getChannelColor,

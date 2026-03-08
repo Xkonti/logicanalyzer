@@ -205,6 +205,14 @@ export const useCaptureStore = defineStore('capture', () => {
     regions.value = regions.value.filter((_, i) => i !== index)
   }
 
+  async function toggleChannelVisibility(channelNumber) {
+    const channels = capturedChannels.value
+    const ch = channels.find((c) => c.channelNumber === channelNumber)
+    if (!ch) return
+    ch.hidden = !ch.hidden
+    capturedChannels.value = [...channels]
+  }
+
   async function clearCapture() {
     capturedChannels.value = []
     bursts.value = null
@@ -244,6 +252,7 @@ export const useCaptureStore = defineStore('capture', () => {
     removeChannel,
     addRegion,
     removeRegion,
+    toggleChannelVisibility,
     clearCapture,
   }
 })
