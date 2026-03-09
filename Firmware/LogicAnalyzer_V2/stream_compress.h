@@ -20,13 +20,16 @@
 #include <stdbool.h>
 
 /* Supported chunk sizes (samples per chunk) */
+#define SC_CHUNK_32      32
+#define SC_CHUNK_64      64
 #define SC_CHUNK_128    128
 #define SC_CHUNK_256    256
 #define SC_CHUNK_512    512
+#define SC_CHUNK_1024  1024
 
 /* Maximum values for static buffer sizing */
 #define SC_MAX_CHANNELS     24
-#define SC_MAX_CHUNK        512
+#define SC_MAX_CHUNK       1024
 #define SC_MAX_CHUNK_WORDS  (SC_MAX_CHUNK / 32)   /* 16 */
 
 /* Header encoding (2 bits per channel, LSB-first packing) */
@@ -139,9 +142,8 @@ uint32_t stream_compress_max_output_size(uint32_t num_channels,
 
 /*
  * Select chunk size based on sample rate.
- *   < 25K sps  -> 128 samples (responsive preview)
- *   25K-200K   -> 256 samples (sweet spot)
- *   > 200K     -> 512 samples (fewer chunks/sec)
+ * Picks the largest chunk from {32,64,128,256,512,1024} that still
+ * gives >= 5 updates/sec (chunk <= sample_rate / 5).
  */
 uint32_t stream_compress_select_chunk_size(uint32_t sample_rate);
 

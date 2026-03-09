@@ -11,12 +11,24 @@
             v-model.number="localFrequency"
             label="Sampling Frequency (Hz)"
             type="number"
-            :min="1000"
+            :min="3000"
             :max="10000000"
             dense
             outlined
             dark
             :hint="frequencyHint"
+          />
+
+          <q-select
+            v-model="localChunkSize"
+            :options="chunkSizeOptions"
+            label="Chunk Size (samples)"
+            dense
+            outlined
+            dark
+            emit-value
+            map-options
+            :hint="chunkSizeHint"
           />
 
           <q-input
@@ -85,6 +97,9 @@ import { useChannelConfigStore } from 'src/stores/channel-config.js'
 import { STREAM_RATE_LIMITS } from 'src/stores/stream.js'
 import ChannelSelector from 'src/components/shared/ChannelSelector.vue'
 
+const CHUNK_SIZES = [32, 64, 128, 256, 512, 1024]
+const TARGET_FPS = 5
+
 defineProps({
   modelValue: { type: Boolean, default: false },
 })
@@ -96,12 +111,36 @@ const cap = useCapture()
 const channelConfig = useChannelConfigStore()
 
 const localFrequency = ref(stream.streamFrequency)
+const localChunkSize = ref(stream.streamChunkSize)
 const localMaxSamples = ref(stream.maxDisplaySamples)
 
 const hasChannels = computed(() => channelConfig.selectedChannels.length > 0)
 
 const isValid = computed(() => {
-  return localFrequency.value >= 1000 && localMaxSamples.value >= 1000
+  return localFrequency.value >= 3000 && localMaxSamples.value >= 1000
+})
+
+const chunkSizeOptions = CHUNK_SIZES.map((size) => ({
+  label: `${size} samples`,
+  value: size,
+}))
+
+const recommendedChunkSize = computed(() => {
+  const freq = localFrequency.value
+  if (freq < 3000) return 32
+  const maxChunk = Math.floor(freq / TARGET_FPS)
+  // Find largest valid chunk size <= maxChunk
+  for (let i = CHUNK_SIZES.length - 1; i >= 0; i--) {
+    if (CHUNK_SIZES[i] <= maxChunk) return CHUNK_SIZES[i]
+  }
+  return 32
+})
+
+const chunkSizeHint = computed(() => {
+  const freq = localFrequency.value
+  if (freq < 3000) return ''
+  const fps = (freq / localChunkSize.value).toFixed(1)
+  return `~${fps} updates/sec (recommended: ${recommendedChunkSize.value} for ≥${TARGET_FPS} fps)`
 })
 
 const recommendedLimit = computed(() => {
@@ -115,7 +154,7 @@ const isOverRecommended = computed(() => {
 
 const frequencyHint = computed(() => {
   const freq = localFrequency.value
-  if (freq < 1000) return ''
+  if (freq < 3000) return 'Minimum: 3,000 Hz (PIO hardware limit)'
   return `Recommended max: ${formatFreq(recommendedLimit.value)} for ${channelConfig.selectedChannels.length}ch`
 })
 
@@ -127,6 +166,7 @@ function formatFreq(hz) {
 
 function onStart() {
   stream.streamFrequency = localFrequency.value
+  stream.streamChunkSize = localChunkSize.value
   stream.maxDisplaySamples = localMaxSamples.value
   stream.startStream()
   emit('update:modelValue', false)

@@ -9,7 +9,6 @@
 #include "pico/multicore.h"
 #include "LogicAnalyzer.pio.h"
 #include "tusb.h"
-#include "pico/stdio.h"
 #include <string.h>
 
 /* External functions from LogicAnalyzer.c */
@@ -36,6 +35,7 @@ static uint32_t stream_num_channels;     /* number of selected channels */
 static uint32_t stream_capture_channels; /* total channels in capture mode (8/16/24) */
 static uint8_t  stream_channel_map[24];  /* maps selected index → DMA bit position */
 static uint32_t stream_chunk_samples;
+static uint32_t stream_actual_freq;  /* actual PIO sample rate after clock divider clamping */
 
 /* ---- DMA / PIO handles ---- */
 static uint32_t stream_dma0;
@@ -184,7 +184,9 @@ static bool setup_stream_pio(uint32_t frequency)
     for (uint8_t i = 0; i < MAX_CHANNELS; i++)
         pio_gpio_init(stream_pio, pinMap[i]);
 
+    /* stream_actual_freq is already computed by StartStream before calling us */
     float clockDiv = (float)clock_get_hz(clk_sys) / (float)frequency;
+    if (clockDiv > 65535.0f) clockDiv = 65535.0f;
 
     pio_sm_config smConfig = BLAST_CAPTURE_program_get_default_config(stream_pio_offset);
     sm_config_set_in_pins(&smConfig, INPUT_PIN_BASE);
@@ -247,16 +249,24 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
         stream_capture_channels = 24;
     }
 
-    stream_num_channels  = req->channelCount;
-    stream_chunk_samples = stream_compress_select_chunk_size(req->frequency);
+    stream_num_channels = req->channelCount;
 
-    /* Debug: print actual values seen by firmware */
-    printf("DBG freq=%lu chunk=%lu chCnt=%u maxCh=%u sizeof=%u\n",
-           (unsigned long)req->frequency,
-           (unsigned long)stream_chunk_samples,
-           (unsigned)req->channelCount,
-           (unsigned)maxCh,
-           (unsigned)sizeof(STREAM_REQUEST));
+    /* Compute actual PIO frequency (clock divider is clamped to 16-bit max in setup_stream_pio) */
+    {
+        float clockDiv = (float)clock_get_hz(clk_sys) / (float)req->frequency;
+        if (clockDiv > 65535.0f) clockDiv = 65535.0f;
+        stream_actual_freq = (uint32_t)((float)clock_get_hz(clk_sys) / clockDiv);
+    }
+
+    /* Use client-provided chunk size, validated to [32, STREAM_MAX_CHUNK] and multiple of 32 */
+    {
+        uint32_t chunk = req->chunkSamples;
+        if (chunk < 32) chunk = 32;
+        if (chunk > STREAM_MAX_CHUNK) chunk = STREAM_MAX_CHUNK;
+        chunk &= ~31u;  /* round down to multiple of 32 */
+        if (chunk == 0) chunk = 32;
+        stream_chunk_samples = chunk;
+    }
 
     /* Reset counters */
     dma_complete_count = 0;
@@ -268,38 +278,44 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     memset(stream_output_size, 0, sizeof(stream_output_size));
 
     /* Setup PIO */
-    printf("DBG step=pio_setup\n"); stdio_flush(); tud_task();
     if (!setup_stream_pio(req->frequency))
     {
         streaming = false;
         return false;
     }
 
-    /* Setup DMA ring buffer (before handshake so failures are reported) */
-    printf("DBG step=dma_setup\n"); stdio_flush(); tud_task();
+    /* Setup DMA ring buffer */
     configure_stream_dma(mode);
 
-    /* Launch Core 1 compression loop */
-    printf("DBG step=core1_launch\n"); stdio_flush(); tud_task();
+    /* Reset Core 1 before launch (required on Pico 2W — CYW43 may touch Core 1 during init).
+     * WARNING: Do NOT call printf/stdio_flush between multicore_reset_core1 and
+     * multicore_launch_core1 — on WiFi builds, Core 1 may hold the stdio mutex
+     * when killed, causing a deadlock. */
     multicore_reset_core1();
-    printf("DBG step=core1_reset_done\n"); stdio_flush(); tud_task();
     multicore_launch_core1(stream_core1_entry);
-    printf("DBG step=core1_launched\n"); stdio_flush(); tud_task();
 
     /* Enable PIO — capture begins */
-    printf("DBG step=pio_enable\n"); stdio_flush(); tud_task();
     pio_sm_set_enabled(stream_pio, stream_sm, true);
 
-    /* Send handshake AFTER all setup succeeds: text response + 4-byte info header */
-    printf("DBG step=handshake\n"); stdio_flush(); tud_task();
-    sendResponse("STREAM_STARTED\n", fromWiFi);
+    /* Send handshake AFTER all setup succeeds: text response + 8-byte info header.
+     * Use cdc_transfer directly for USB — printf/stdio_flush would deadlock because
+     * multicore_reset_core1() may have killed Core 1 while it held the stdio mutex. */
+    if (fromWiFi)
+        sendResponse("STREAM_STARTED\n", true);
+    else
+        cdc_transfer((unsigned char *)"STREAM_STARTED\n", 15);
+    tud_task();
 
-    uint8_t info[4];
+    uint8_t info[8];
     info[0] = stream_chunk_samples & 0xFF;
     info[1] = (stream_chunk_samples >> 8) & 0xFF;
     info[2] = (uint8_t)stream_num_channels;
     info[3] = 0; /* reserved */
-    cdc_transfer(info, 4);
+    info[4] = stream_actual_freq & 0xFF;
+    info[5] = (stream_actual_freq >> 8) & 0xFF;
+    info[6] = (stream_actual_freq >> 16) & 0xFF;
+    info[7] = (stream_actual_freq >> 24) & 0xFF;
+    cdc_transfer(info, 8);
 
     return true;
 }
@@ -384,11 +400,19 @@ void RunStreamSendLoop(bool fromWiFi)
     uint8_t eof[2] = { 0x00, 0x00 };
     cdc_transfer(eof, 2);
 
-    /* Send termination status */
-    if (overflow)
-        sendResponse("STREAM_OVERFLOW\n", fromWiFi);
+    /* Send termination status — use cdc_transfer for USB to avoid stdio mutex deadlock
+     * (mutex may still be locked from multicore_reset_core1 in StartStream). */
+    if (fromWiFi)
+    {
+        sendResponse(overflow ? "STREAM_OVERFLOW\n" : "STREAM_DONE\n", true);
+    }
     else
-        sendResponse("STREAM_DONE\n", fromWiFi);
+    {
+        if (overflow)
+            cdc_transfer((unsigned char *)"STREAM_OVERFLOW\n", 16);
+        else
+            cdc_transfer((unsigned char *)"STREAM_DONE\n", 12);
+    }
 }
 
 bool IsStreamActive(void)

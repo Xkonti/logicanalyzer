@@ -19,6 +19,7 @@ export function useStream() {
 
   // Config (writable)
   const streamFrequency = configRef(stream, 'streamFrequency')
+  const streamChunkSize = configRef(stream, 'streamChunkSize')
   const maxDisplaySamples = configRef(stream, 'maxDisplaySamples')
   const following = configRef(stream, 'following')
 
@@ -71,6 +72,7 @@ export function useStream() {
   return reactive({
     // Config
     streamFrequency,
+    streamChunkSize,
     maxDisplaySamples,
     following,
 

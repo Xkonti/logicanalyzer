@@ -61,6 +61,8 @@
         uint8_t channels[32];
         //Number of channels (1-24)
         uint8_t channelCount;
+        //Chunk size in samples (32-1024, must be multiple of 32)
+        uint16_t chunkSamples;
         //Sampling frequency in Hz
         uint32_t frequency;
     } STREAM_REQUEST;

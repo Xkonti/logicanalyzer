@@ -38,6 +38,7 @@ export const STREAM_RATE_LIMITS = {
 export const useStreamStore = defineStore('stream', () => {
   // Config (persisted)
   const streamFrequency = useLocalStorage('la-stream-frequency', 250000)
+  const streamChunkSize = useLocalStorage('la-stream-chunk-size', 512)
   const maxDisplaySamples = useLocalStorage('la-stream-max-samples', 50000)
 
   // State
@@ -186,16 +187,20 @@ export const useStreamStore = defineStore('stream', () => {
     lastFlushTime = 0
 
     const result = await device.driver.startStream(
-      { channels: channelNumbers, frequency: freq },
+      { channels: channelNumbers, frequency: freq, chunkSamples: streamChunkSize.value },
       onChunk,
       onStreamEnd,
     )
 
     if (result.started) {
+      // Use actual PIO frequency for timeline (may differ from requested if clamped)
+      if (result.actualFrequency && result.actualFrequency !== freq) {
+        streamFrequency.value = result.actualFrequency
+      }
       streaming.value = true
       device.streaming = true
     } else {
-      streamError.value = 'Failed to start stream'
+      streamError.value = result.error || 'Failed to start stream'
       streamChannels.value = []
     }
   }
@@ -227,6 +232,7 @@ export const useStreamStore = defineStore('stream', () => {
 
   return {
     streamFrequency,
+    streamChunkSize,
     maxDisplaySamples,
     streaming,
     streamError,

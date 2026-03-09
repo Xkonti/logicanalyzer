@@ -121,12 +121,14 @@ export function buildPreviewRequest(config) {
  * Matches the C firmware STREAM_REQUEST with natural alignment:
  *   offset 0:  uint8_t[32] channels (zero-padded)
  *   offset 32: uint8_t channelCount
- *   offset 33-35: padding
+ *   offset 33: padding
+ *   offset 34: uint16_t chunkSamples (LE)
  *   offset 36: uint32_t frequency (LE)
  *
  * @param {Object} config
  * @param {number[]} config.channels - channel numbers (up to 32)
  * @param {number} config.channelCount
+ * @param {number} config.chunkSamples - chunk size in samples (32-1024, multiple of 32)
  * @param {number} config.frequency - sampling frequency in Hz
  * @returns {Uint8Array} exactly 40 bytes
  */
@@ -141,7 +143,8 @@ export function buildStreamRequest(config) {
   }
 
   view.setUint8(32, config.channelCount)
-  // offset 33-35: alignment padding (already zero)
+  // offset 33: alignment padding (already zero)
+  view.setUint16(34, config.chunkSamples, true) // little-endian
   view.setUint32(36, config.frequency, true) // little-endian
 
   return new Uint8Array(buffer)

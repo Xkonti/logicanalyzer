@@ -547,8 +547,26 @@ uint32_t stream_compress_max_output_size(uint32_t num_channels,
     return ((num_channels + 3) >> 2) + num_channels * raw_bytes;
 }
 
+/*
+ * Target update rate for realtime display. Chunk size is the largest
+ * value where chunk <= sample_rate / STREAM_TARGET_FPS.
+ * Table is sorted largest-first; min_rate = chunk_size * STREAM_TARGET_FPS.
+ */
+#define STREAM_TARGET_FPS 5
+
+static const struct { uint32_t min_rate; uint32_t chunk_size; } sc_chunk_table[] = {
+    { 5120, SC_CHUNK_1024 },
+    { 2560, SC_CHUNK_512  },
+    { 1280, SC_CHUNK_256  },
+    {  640, SC_CHUNK_128  },
+    {  320, SC_CHUNK_64   },
+    {    0, SC_CHUNK_32   },
+};
+
 uint32_t stream_compress_select_chunk_size(uint32_t sample_rate) {
-    if (sample_rate > 200000) return SC_CHUNK_512;
-    if (sample_rate >= 25000) return SC_CHUNK_256;
-    return SC_CHUNK_128;
+    for (uint32_t i = 0; i < sizeof(sc_chunk_table) / sizeof(sc_chunk_table[0]); i++) {
+        if (sample_rate >= sc_chunk_table[i].min_rate)
+            return sc_chunk_table[i].chunk_size;
+    }
+    return SC_CHUNK_32;
 }

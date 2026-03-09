@@ -502,30 +502,36 @@ export class AnalyzerDriver {
       const reqBytes = buildStreamRequest({
         channels: config.channels,
         channelCount: config.channels.length,
+        chunkSamples: config.chunkSamples || 512,
         frequency: config.frequency,
       })
-      console.log(`[stream] request: channels=${JSON.stringify(config.channels)}, freq=${config.frequency}`)
-      console.log(`[stream] packet bytes [32..39]:`, Array.from(reqBytes.slice(32, 40)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '))
 
       const pkt = new OutputPacket()
       pkt.addByte(CMD_START_STREAM)
       pkt.addBytes(reqBytes)
       await this.#transport.write(pkt.serialize())
 
-      // Read lines until we get STREAM_STARTED (skip debug output)
+      // Read handshake with timeout — firmware should respond within 3 seconds
+      const handshakeTimeout = 3000
       let response
-      for (let i = 0; i < 10; i++) {
-        response = await this.#transport.readLine()
-        console.log(`[stream] device: "${response}"`)
+      for (let i = 0; i < 20; i++) {
+        response = await Promise.race([
+          this.#transport.readLine(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Stream handshake timeout')), handshakeTimeout),
+          ),
+        ])
         if (response === 'STREAM_STARTED') break
       }
-      if (response !== 'STREAM_STARTED') return { started: false }
+      if (response !== 'STREAM_STARTED') {
+        return { started: false, error: `Unexpected response: "${response}"` }
+      }
 
-      // Read 4-byte info header: [chunkSamples LE16][numChannels u8][reserved u8]
-      const info = await this.#transport.readBytes(4)
+      // Read 8-byte info header: [chunkSamples LE16][numChannels u8][reserved u8][actualFreq LE32]
+      const info = await this.#transport.readBytes(8)
       const chunkSamples = info[0] | (info[1] << 8)
       const numChannels = info[2]
-      console.log(`[stream] info: chunkSamples=${chunkSamples}, numChannels=${numChannels}`)
+      const actualFrequency = info[4] | (info[5] << 8) | (info[6] << 16) | (info[7] << 24)
 
       this.#streaming = true
 
@@ -533,10 +539,10 @@ export class AnalyzerDriver {
       this.#streamEndStatus = null
       this.#readStreamLoop(numChannels, chunkSamples, onChunk, onEnd)
 
-      return { started: true, chunkSamples, numChannels }
+      return { started: true, chunkSamples, numChannels, actualFrequency }
     } catch (err) {
       console.error('[stream] startStream error:', err)
-      return { started: false }
+      return { started: false, error: err?.message }
     }
   }
 
@@ -557,9 +563,6 @@ export class AnalyzerDriver {
         const compressed = await this.#transport.readBytes(compressedSize)
         const { channels } = decompressChunk(compressed, numChannels, chunkSamples)
         chunksReceived++
-        if (chunksReceived <= 3) {
-          console.log(`[stream] chunk #${chunksReceived}: ${compressedSize} bytes compressed`)
-        }
         onChunk(channels, chunkSamples)
       }
 
