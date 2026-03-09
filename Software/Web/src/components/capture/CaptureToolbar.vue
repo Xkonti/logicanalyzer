@@ -55,18 +55,6 @@
       @click="stream.stopStream()"
     />
 
-    <q-separator vertical inset class="q-mx-xs" dark />
-
-    <q-btn
-      color="secondary"
-      icon="science"
-      label="Test"
-      :disable="!cap.isConnected || cap.isCapturing || stream.isStreaming"
-      no-caps
-      dense
-      @click="showCompressTest = true"
-    />
-
     <q-chip
       v-if="cap.captureError"
       color="negative"
@@ -105,8 +93,6 @@
 
     <CaptureDialog v-model="showCaptureDialog" />
 
-    <CompressTestDialog v-model="showCompressTest" />
-
     <StreamDialog v-model="showStreamDialog" />
   </div>
 </template>
@@ -117,11 +103,9 @@ import { useCapture } from 'src/composables/useCapture.js'
 import { useStream } from 'src/composables/useStream.js'
 import CaptureDialog from 'src/components/capture/CaptureDialog.vue'
 import StreamDialog from 'src/components/capture/StreamDialog.vue'
-import CompressTestDialog from 'src/components/diagnostics/CompressTestDialog.vue'
 
 const cap = useCapture()
 const stream = useStream()
 const showCaptureDialog = ref(false)
 const showStreamDialog = ref(false)
-const showCompressTest = ref(false)
 </script>

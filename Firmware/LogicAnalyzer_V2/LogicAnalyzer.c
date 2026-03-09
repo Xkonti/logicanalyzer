@@ -17,7 +17,6 @@
 #include "tusb.h"
 #include "pico/unique_id.h"
 #include "pico/bootrom.h"
-#include "compress_test.h"
 #include "LogicAnalyzer_Stream.h"
 
 #ifdef WS2812_LED
@@ -486,15 +485,6 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                     case 8: //Stop preview
                         previewing = false;
                         sendResponse("PREVIEW_STOPPED\n", fromWiFi);
-                        break;
-
-                    case 9: //Compression test
-                        if(capturing || previewing || streaming_active)
-                        {
-                            sendResponse("ERR_BUSY\n", fromWiFi);
-                            break;
-                        }
-                        run_compression_test(fromWiFi);
                         break;
 
                     case 10: //Start stream

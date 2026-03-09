@@ -22,7 +22,6 @@ import {
   CMD_STOP_CAPTURE,
   CMD_START_PREVIEW,
   CMD_STOP_PREVIEW,
-  CMD_COMPRESSION_TEST,
   CMD_START_STREAM,
   CMD_STOP_STREAM,
   CMD_ENTER_BOOTLOADER,
@@ -38,8 +37,7 @@ import {
   FAST_TRIGGER_DELAY,
 } from '../protocol/commands.js'
 import { extractSamples, processBurstTimestamps } from './samples.js'
-import { decompressChunk, reverseTranspose } from '../compression/decoder.js'
-import { generatePattern, forwardTranspose, PATTERN_NAMES } from '../compression/test-patterns.js'
+import { decompressChunk } from '../compression/decoder.js'
 
 export class AnalyzerDriver {
   #transport = null
@@ -479,126 +477,6 @@ export class AnalyzerDriver {
         this.#previewing = false
       }
     }
-  }
-
-  /**
-   * Runs the compression test. Sends CMD_COMPRESSION_TEST, reads 45 test results,
-   * decompresses each, regenerates the test pattern, and verifies round-trip correctness.
-   *
-   * @param {(progress: number) => void} [onProgress] - called with test index (0..44)
-   * @returns {Promise<Object[]>} array of result objects
-   */
-  async runCompressionTest(onProgress) {
-    if (this.#capturing || this.#previewing) throw new Error('Device is busy')
-    if (!this.#transport?.connected) throw new Error('Not connected')
-
-    const pkt = new OutputPacket()
-    pkt.addByte(CMD_COMPRESSION_TEST)
-    await this.#transport.write(pkt.serialize())
-
-    const startLine = await this.#transport.readLine()
-    if (startLine !== 'COMPRESS_TEST') {
-      throw new Error(`Expected COMPRESS_TEST, got "${startLine}"`)
-    }
-
-    const countBytes = await this.#transport.readBytes(2)
-    const testCount = countBytes[0] | (countBytes[1] << 8)
-
-    const results = []
-    for (let i = 0; i < testCount; i++) {
-      onProgress?.(i, testCount)
-
-      const hdr = await this.#transport.readBytes(16)
-      const patternId = hdr[0]
-      const numChannels = hdr[1]
-      const chunkSamples = hdr[2] | (hdr[3] << 8)
-      const payloadSize = hdr[4] | (hdr[5] << 8)
-      const rawInputSize = hdr[6] | (hdr[7] << 8)
-      const avgCompressUs = hdr[8] | (hdr[9] << 8) | (hdr[10] << 16) | ((hdr[11] << 24) >>> 0)
-      const avgCompressedSize = hdr[12] | (hdr[13] << 8)
-      const iterations = hdr[14] | (hdr[15] << 8)
-
-      const compressed = await this.#transport.readBytes(payloadSize)
-
-      // Use avg values for analysis; payload is last iteration for verification
-      const compressedSize = avgCompressedSize || payloadSize
-      const compressUs = avgCompressUs
-
-      // Decompress and verify last iteration's data
-      let pass = false
-      let mismatchInfo = null
-      try {
-        const { channels } = decompressChunk(compressed, numChannels, chunkSamples)
-        const reconstructed = reverseTranspose(channels, numChannels, chunkSamples)
-
-        // For multi-iteration tests, verify with the last chunk's offset
-        const chunkOffset = iterations > 0 ? (iterations - 1) * chunkSamples : 0
-        const expected = generatePattern(patternId, numChannels, chunkSamples, chunkOffset)
-
-        // Also compute expected transposed channels for per-channel comparison
-        const expectedChannels = forwardTranspose(expected, numChannels, chunkSamples)
-
-        if (reconstructed.length !== expected.length) {
-          mismatchInfo = `length: got ${reconstructed.length}, expected ${expected.length}`
-        } else {
-          let firstBad = -1
-          for (let j = 0; j < expected.length; j++) {
-            if (reconstructed[j] !== expected[j]) {
-              firstBad = j
-              break
-            }
-          }
-          if (firstBad >= 0) {
-            // Find which channel(s) are wrong and their header modes
-            const modes = []
-            for (let c = 0; c < numChannels; c++) {
-              modes.push((compressed[c >> 2] >> ((c & 3) * 2)) & 0x03)
-            }
-            const MODE_NAMES = ['RAW', 'ZERO', 'ONE', 'ENC']
-            const badChannels = []
-            for (let c = 0; c < numChannels; c++) {
-              const exp = expectedChannels[c]
-              const got = channels[c]
-              if (exp.length !== got.length || !exp.every((b, k) => b === got[k])) {
-                badChannels.push(`ch${c}(${MODE_NAMES[modes[c]]})`)
-              }
-            }
-
-            const bps = numChannels <= 8 ? 1 : numChannels <= 16 ? 2 : 4
-            const sample = Math.floor(firstBad / bps)
-            mismatchInfo = `byte[${firstBad}] sample=${sample}: got=0x${reconstructed[firstBad].toString(16).padStart(2, '0')} exp=0x${expected[firstBad].toString(16).padStart(2, '0')} | bad channels: ${badChannels.join(', ')}`
-          } else {
-            pass = true
-          }
-        }
-      } catch (e) {
-        mismatchInfo = `decode error: ${e?.message ?? e}`
-      }
-
-      results.push({
-        index: i,
-        patternId,
-        patternName: PATTERN_NAMES[patternId] ?? `PAT_${patternId}`,
-        numChannels,
-        chunkSamples,
-        compressedSize,
-        rawInputSize,
-        ratio: rawInputSize > 0 ? (compressedSize / rawInputSize).toFixed(3) : '?',
-        compressUs,
-        iterations,
-        pass,
-        mismatchInfo,
-      })
-    }
-
-    onProgress?.(testCount, testCount)
-
-    const endLine = await this.#transport.readLine()
-    if (endLine !== 'COMPRESS_TEST_DONE') {
-      throw new Error(`Expected COMPRESS_TEST_DONE, got "${endLine}"`)
-    }
-
-    return results
   }
 
   /**
