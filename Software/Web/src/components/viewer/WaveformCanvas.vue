@@ -26,7 +26,7 @@ const cap = useCapture()
 const stream = useStream()
 
 const activeChannels = computed(() => {
-  if (stream.isStreaming) return stream.streamChannels
+  if (stream.isStreaming || stream.streamChannels.length > 0) return stream.streamChannels
   return cap.capturedChannels
 })
 
@@ -137,8 +137,8 @@ watchEffect(() => {
   if (!renderer.value) return
   renderer.value.setChannels(mapChannels(activeChannels.value))
   renderer.value.setViewport(viewport.firstSample, viewport.visibleSamples)
-  // Skip capture-specific markers during stream
-  if (stream.isStreaming) {
+  // Skip capture-specific markers when showing stream data
+  if (stream.isStreaming || stream.streamChannels.length > 0) {
     renderer.value.setPreTriggerSamples(0)
     renderer.value.setBursts([])
     renderer.value.setRegions([])

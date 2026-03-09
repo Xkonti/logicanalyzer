@@ -9,7 +9,7 @@ import { ref, shallowRef, watchEffect, computed, onMounted, onBeforeUnmount } fr
 import { TimelineRenderer } from 'src/core/renderer/timeline-renderer.js'
 import { useViewportStore } from 'src/stores/viewport.js'
 import { useCapture } from 'src/composables/useCapture.js'
-import { usePreview } from 'src/composables/usePreview.js'
+import { useStream } from 'src/composables/useStream.js'
 
 const containerRef = ref(null)
 const canvasRef = ref(null)
@@ -17,10 +17,10 @@ const renderer = shallowRef(null)
 
 const viewport = useViewportStore()
 const cap = useCapture()
-const preview = usePreview()
+const stream = useStream()
 
 const activeFrequency = computed(() => {
-  if (preview.isPreviewing) return preview.probingFrequency
+  if (stream.isStreaming || stream.streamChannels.length > 0) return stream.streamFrequency
   return cap.frequency
 })
 

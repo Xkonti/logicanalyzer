@@ -13,7 +13,7 @@ export const useViewportStore = defineStore('viewport', () => {
 
   function getEffectiveTotalSamples() {
     const stream = useStreamStore()
-    if (stream.streaming) return stream.totalSamples
+    if (stream.streaming || stream.streamChannels.length > 0) return stream.totalSamples
     return useCaptureStore().totalSamples
   }
 

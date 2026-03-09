@@ -94,6 +94,10 @@ export const useCaptureStore = defineStore('capture', () => {
     captureError.value = null
     device.capturing = true
 
+    // Clear stream data so capture results take priority in the display
+    const { useStreamStore } = await import('./stream.js')
+    useStreamStore().clearStream()
+
     try {
       const sess = buildSession()
       await device.driver.startCapture(sess, (result) => {

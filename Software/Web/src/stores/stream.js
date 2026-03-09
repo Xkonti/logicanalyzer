@@ -52,9 +52,10 @@ export const useStreamStore = defineStore('stream', () => {
   const hasStream = computed(() => streaming.value && streamChannels.value.length > 0)
   const totalSamples = computed(() => sampleCount.value)
 
-  // rAF batching state (non-reactive for performance)
+  // Time-based batching state (non-reactive for performance)
   let pendingChunks = []
-  let rafScheduled = false
+  let lastFlushTime = 0
+  const FLUSH_INTERVAL_MS = 16 // ~60fps
 
   /**
    * Unpacks a transposed bitstream (chunkSamples/8 bytes) into per-sample 0/1 Uint8Array.
@@ -69,19 +70,39 @@ export const useStreamStore = defineStore('stream', () => {
 
   /**
    * Called by the driver's read loop for each decompressed chunk.
-   * Batches updates to flush at rAF rate for performance.
+   * Uses time-based synchronous flushing to avoid rAF starvation
+   * from microtask-driven read loops.
    */
   function onChunk(channels, chunkSamples) {
     const unpacked = channels.map((ch) => unpackBitstream(ch, chunkSamples))
     pendingChunks.push({ unpacked, chunkSamples })
-    if (!rafScheduled) {
-      rafScheduled = true
-      requestAnimationFrame(flushChunks)
+
+    const now = performance.now()
+    if (now - lastFlushTime >= FLUSH_INTERVAL_MS) {
+      lastFlushTime = now
+      flushChunks()
     }
   }
 
+  /**
+   * Called when the read loop ends (EOF or error).
+   */
+  function onStreamEnd(endStatus, error) {
+    // Flush any remaining buffered chunks
+    flushChunks()
+
+    if (error) {
+      streamError.value = error
+    }
+    if (endStatus === 'STREAM_OVERFLOW') {
+      streamWarning.value = 'Stream ended due to overflow — data rate exceeded device capacity'
+    }
+    streaming.value = false
+    const device = useDeviceStore()
+    device.streaming = false
+  }
+
   function flushChunks() {
-    rafScheduled = false
     if (pendingChunks.length === 0) return
 
     const chunks = pendingChunks
@@ -162,11 +183,12 @@ export const useStreamStore = defineStore('stream', () => {
     sampleCount.value = 0
     following.value = true
     pendingChunks = []
-    rafScheduled = false
+    lastFlushTime = 0
 
     const result = await device.driver.startStream(
       { channels: channelNumbers, frequency: freq },
       onChunk,
+      onStreamEnd,
     )
 
     if (result.started) {
@@ -179,16 +201,15 @@ export const useStreamStore = defineStore('stream', () => {
   }
 
   async function stopStream() {
+    if (!streaming.value) return
+
     const device = useDeviceStore()
+    if (device.driver) {
+      await device.driver.stopStream()
+    }
+    // onStreamEnd callback should have handled this, but force cleanup as fallback
     streaming.value = false
     device.streaming = false
-
-    if (device.driver) {
-      const result = await device.driver.stopStream()
-      if (result.endStatus === 'STREAM_OVERFLOW') {
-        streamWarning.value = 'Stream ended due to overflow — data rate exceeded device capacity'
-      }
-    }
   }
 
   function clearStream() {
@@ -199,7 +220,7 @@ export const useStreamStore = defineStore('stream', () => {
     sampleCount.value = 0
     following.value = true
     pendingChunks = []
-    rafScheduled = false
+    lastFlushTime = 0
     const device = useDeviceStore()
     device.streaming = false
   }

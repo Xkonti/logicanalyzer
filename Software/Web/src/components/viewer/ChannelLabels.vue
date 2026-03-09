@@ -28,7 +28,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useCapture } from 'src/composables/useCapture.js'
-import { usePreview } from 'src/composables/usePreview.js'
+import { useStream } from 'src/composables/useStream.js'
 
 defineProps({
   channelHeight: {
@@ -38,24 +38,19 @@ defineProps({
 })
 
 const cap = useCapture()
-const preview = usePreview()
+const stream = useStream()
 
 const activeChannels = computed(() => {
-  if (preview.isPreviewing) return preview.previewChannels
+  if (stream.isStreaming || stream.streamChannels.length > 0) return stream.streamChannels
   return cap.capturedChannels
 })
 
 function getChannelColor(channelNumber) {
-  if (preview.isPreviewing) return preview.getChannelColor(channelNumber)
   return cap.getChannelColor(channelNumber)
 }
 
 function toggleVisibility(channelNumber) {
-  if (preview.isPreviewing) {
-    preview.toggleChannelVisibility(channelNumber)
-  } else {
-    cap.toggleChannelVisibility(channelNumber)
-  }
+  cap.toggleChannelVisibility(channelNumber)
 }
 </script>
 

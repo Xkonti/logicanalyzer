@@ -107,6 +107,31 @@ uint32_t stream_compress_buffer(const uint8_t *dma_buf,
                                  uint32_t out_capacity);
 
 /*
+ * Compress one chunk with a channel map.
+ *
+ * Like stream_compress_chunk, but only compresses channels listed in
+ * channel_map[0..num_selected-1]. The DMA data is transposed using
+ * capture_channels (8, 16, or 24 — full PIO capture width), then only
+ * the selected bit positions are encoded.
+ *
+ * Parameters:
+ *   samples          - interleaved DMA samples
+ *   channel_map      - array of selected channel indices (bit positions in DMA word)
+ *   num_selected     - number of selected channels (1..24)
+ *   capture_channels - total channels in capture mode (8, 16, or 24)
+ *   chunk_samples    - samples per chunk (128, 256, or 512)
+ *   out              - output buffer
+ *
+ * Returns: bytes written to out.
+ */
+uint32_t stream_compress_chunk_mapped(const uint8_t *samples,
+                                       const uint8_t *channel_map,
+                                       uint32_t num_selected,
+                                       uint32_t capture_channels,
+                                       uint32_t chunk_samples,
+                                       uint8_t *out);
+
+/*
  * Maximum possible output size for one chunk (header + all channels raw).
  */
 uint32_t stream_compress_max_output_size(uint32_t num_channels,

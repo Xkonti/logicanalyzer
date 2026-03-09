@@ -448,6 +448,69 @@ uint32_t stream_compress_chunk(const uint8_t *samples,
     return data_pos;
 }
 
+uint32_t stream_compress_chunk_mapped(const uint8_t *samples,
+                                       const uint8_t *channel_map,
+                                       uint32_t num_selected,
+                                       uint32_t capture_channels,
+                                       uint32_t chunk_samples,
+                                       uint8_t *out) {
+    const uint32_t chunk_words = chunk_samples / 32;
+    const uint32_t chunk_nibbles = chunk_samples / 4;
+    const uint32_t raw_bytes = chunk_samples / 8;
+    const uint32_t num_groups = chunk_samples / 8;
+
+    /* --- Stage 1: Bit-transpose all capture channels --- */
+    if (capture_channels <= 8)
+        transpose_chunk_8ch(samples, capture_channels, num_groups);
+    else if (capture_channels <= 16)
+        transpose_chunk_16ch(samples, capture_channels, num_groups);
+    else
+        transpose_chunk_24ch(samples, capture_channels, num_groups);
+
+    /* --- Stage 2-4: Classify + encode only selected channels --- */
+    const uint32_t header_bytes = (num_selected + 3) >> 2;
+    uint32_t data_pos = header_bytes;
+    uint8_t header[8] = {0};
+
+    uint8_t enc_buf[SC_MAX_CHUNK / 8 + 8];
+
+    for (uint32_t i = 0; i < num_selected; i++) {
+        uint32_t ch = channel_map[i]; /* actual bit position in DMA data */
+        uint32_t hdr_byte = i >> 2;
+        uint32_t hdr_shift = (i & 3) * 2;
+        uint32_t mode;
+
+        uint32_t or_all = 0, and_all = 0xFFFFFFFF;
+        for (uint32_t w = 0; w < chunk_words; w++) {
+            or_all  |= s_transposed[ch][w];
+            and_all &= s_transposed[ch][w];
+        }
+
+        if (or_all == 0) {
+            mode = SC_HDR_ALL_ZERO;
+        } else if (and_all == 0xFFFFFFFF) {
+            mode = SC_HDR_ALL_ONE;
+        } else {
+            uint32_t enc_size = encode_channel(ch, chunk_nibbles, chunk_words,
+                                                raw_bytes, enc_buf);
+            if (enc_size > 0) {
+                mode = SC_HDR_NIBBLE_ENC;
+                memcpy(&out[data_pos], enc_buf, enc_size);
+                data_pos += enc_size;
+            } else {
+                mode = SC_HDR_RAW;
+                memcpy(&out[data_pos], s_transposed[ch], raw_bytes);
+                data_pos += raw_bytes;
+            }
+        }
+
+        header[hdr_byte] |= (uint8_t)(mode << hdr_shift);
+    }
+
+    memcpy(out, header, header_bytes);
+    return data_pos;
+}
+
 uint32_t stream_compress_buffer(const uint8_t *dma_buf,
                                  uint32_t dma_buf_size,
                                  uint32_t num_channels,

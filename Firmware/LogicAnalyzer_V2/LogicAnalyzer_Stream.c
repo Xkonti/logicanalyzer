@@ -9,6 +9,7 @@
 #include "pico/multicore.h"
 #include "LogicAnalyzer.pio.h"
 #include "tusb.h"
+#include "pico/stdio.h"
 #include <string.h>
 
 /* External functions from LogicAnalyzer.c */
@@ -31,7 +32,9 @@ static volatile bool streaming;
 static volatile bool overflow;
 
 /* ---- Capture parameters (set at stream start, read by Core 1) ---- */
-static uint32_t stream_num_channels;
+static uint32_t stream_num_channels;     /* number of selected channels */
+static uint32_t stream_capture_channels; /* total channels in capture mode (8/16/24) */
+static uint8_t  stream_channel_map[24];  /* maps selected index → DMA bit position */
 static uint32_t stream_chunk_samples;
 
 /* ---- DMA / PIO handles ---- */
@@ -56,17 +59,17 @@ void __not_in_flash_func(stream_dma_handler)(void)
      * After incrementing, (dma_complete_count + 1) % STREAM_SLOTS is
      * the slot AFTER the one the other DMA channel is currently writing.
      */
-    if (dma_channel_get_irq0_status(stream_dma0))
+    if (dma_channel_get_irq1_status(stream_dma0))
     {
-        dma_channel_acknowledge_irq0(stream_dma0);
+        dma_channel_acknowledge_irq1(stream_dma0);
         dma_complete_count++;
         uint32_t next = (dma_complete_count + 1) % STREAM_SLOTS;
         dma_channel_set_write_addr(stream_dma0, stream_input[next], false);
     }
 
-    if (dma_channel_get_irq0_status(stream_dma1))
+    if (dma_channel_get_irq1_status(stream_dma1))
     {
-        dma_channel_acknowledge_irq0(stream_dma1);
+        dma_channel_acknowledge_irq1(stream_dma1);
         dma_complete_count++;
         uint32_t next = (dma_complete_count + 1) % STREAM_SLOTS;
         dma_channel_set_write_addr(stream_dma1, stream_input[next], false);
@@ -98,7 +101,7 @@ static void configure_stream_dma(CHANNEL_MODE mode)
     channel_config_set_dreq(&c0, pio_get_dreq(stream_pio, stream_sm, false));
     channel_config_set_chain_to(&c0, stream_dma1);
     channel_config_set_enable(&c0, true);
-    dma_channel_set_irq0_enabled(stream_dma0, true);
+    dma_channel_set_irq1_enabled(stream_dma0, true);
 
     /* DMA1 config */
     dma_channel_config c1 = dma_channel_get_default_config(stream_dma1);
@@ -108,12 +111,11 @@ static void configure_stream_dma(CHANNEL_MODE mode)
     channel_config_set_dreq(&c1, pio_get_dreq(stream_pio, stream_sm, false));
     channel_config_set_chain_to(&c1, stream_dma0);
     channel_config_set_enable(&c1, true);
-    dma_channel_set_irq0_enabled(stream_dma1, true);
+    dma_channel_set_irq1_enabled(stream_dma1, true);
 
-    /* Set ISR */
-    irq_set_exclusive_handler(DMA_IRQ_0, stream_dma_handler);
-    irq_set_enabled(DMA_IRQ_0, true);
-    irq_set_priority(DMA_IRQ_0, 0);
+    /* Set ISR — use DMA_IRQ_1 with shared handler to avoid conflicts */
+    irq_add_shared_handler(DMA_IRQ_1, stream_dma_handler, PICO_SHARED_IRQ_HANDLER_HIGHEST_ORDER_PRIORITY);
+    irq_set_enabled(DMA_IRQ_1, true);
 
     /* DMA1 configured but not triggered; DMA0 configured and triggered.
      * DMA0 writes to slot[0], DMA1 writes to slot[1]. */
@@ -140,9 +142,11 @@ static void stream_core1_entry(void)
         {
             uint32_t slot = compress_head % STREAM_SLOTS;
 
-            stream_output_size[slot] = stream_compress_chunk(
+            stream_output_size[slot] = stream_compress_chunk_mapped(
                 stream_input[slot],
+                stream_channel_map,
                 stream_num_channels,
+                stream_capture_channels,
                 stream_chunk_samples,
                 stream_output[slot]
             );
@@ -215,17 +219,44 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     if (req->frequency < 1)
         return false;
 
-    /* Determine capture mode */
+    /* Find highest channel number to determine capture mode */
+    uint8_t maxCh = 0;
+    for (int i = 0; i < req->channelCount; i++)
+    {
+        if (req->channels[i] >= MAX_CHANNELS)
+            return false;
+        if (req->channels[i] > maxCh)
+            maxCh = req->channels[i];
+        stream_channel_map[i] = req->channels[i];
+    }
+
     CHANNEL_MODE mode;
-    if (req->channelCount <= 8)
+    if (maxCh < 8)
+    {
         mode = MODE_8_CHANNEL;
-    else if (req->channelCount <= 16)
+        stream_capture_channels = 8;
+    }
+    else if (maxCh < 16)
+    {
         mode = MODE_16_CHANNEL;
+        stream_capture_channels = 16;
+    }
     else
+    {
         mode = MODE_24_CHANNEL;
+        stream_capture_channels = 24;
+    }
 
     stream_num_channels  = req->channelCount;
     stream_chunk_samples = stream_compress_select_chunk_size(req->frequency);
+
+    /* Debug: print actual values seen by firmware */
+    printf("DBG freq=%lu chunk=%lu chCnt=%u maxCh=%u sizeof=%u\n",
+           (unsigned long)req->frequency,
+           (unsigned long)stream_chunk_samples,
+           (unsigned)req->channelCount,
+           (unsigned)maxCh,
+           (unsigned)sizeof(STREAM_REQUEST));
 
     /* Reset counters */
     dma_complete_count = 0;
@@ -237,13 +268,30 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     memset(stream_output_size, 0, sizeof(stream_output_size));
 
     /* Setup PIO */
+    printf("DBG step=pio_setup\n"); stdio_flush(); tud_task();
     if (!setup_stream_pio(req->frequency))
     {
         streaming = false;
         return false;
     }
 
-    /* Send handshake: text response + 4-byte info header */
+    /* Setup DMA ring buffer (before handshake so failures are reported) */
+    printf("DBG step=dma_setup\n"); stdio_flush(); tud_task();
+    configure_stream_dma(mode);
+
+    /* Launch Core 1 compression loop */
+    printf("DBG step=core1_launch\n"); stdio_flush(); tud_task();
+    multicore_reset_core1();
+    printf("DBG step=core1_reset_done\n"); stdio_flush(); tud_task();
+    multicore_launch_core1(stream_core1_entry);
+    printf("DBG step=core1_launched\n"); stdio_flush(); tud_task();
+
+    /* Enable PIO — capture begins */
+    printf("DBG step=pio_enable\n"); stdio_flush(); tud_task();
+    pio_sm_set_enabled(stream_pio, stream_sm, true);
+
+    /* Send handshake AFTER all setup succeeds: text response + 4-byte info header */
+    printf("DBG step=handshake\n"); stdio_flush(); tud_task();
     sendResponse("STREAM_STARTED\n", fromWiFi);
 
     uint8_t info[4];
@@ -252,15 +300,6 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     info[2] = (uint8_t)stream_num_channels;
     info[3] = 0; /* reserved */
     cdc_transfer(info, 4);
-
-    /* Setup DMA ring buffer */
-    configure_stream_dma(mode);
-
-    /* Launch Core 1 compression loop */
-    multicore_launch_core1(stream_core1_entry);
-
-    /* Enable PIO — capture begins */
-    pio_sm_set_enabled(stream_pio, stream_sm, true);
 
     return true;
 }
@@ -283,10 +322,9 @@ void CleanupStream(void)
     hw_clear_bits(&dma_hw->ch[stream_dma1].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
     dma_channel_abort(stream_dma0);
     dma_channel_abort(stream_dma1);
-    dma_channel_set_irq0_enabled(stream_dma0, false);
-    dma_channel_set_irq0_enabled(stream_dma1, false);
-    irq_set_enabled(DMA_IRQ_0, false);
-    irq_remove_handler(DMA_IRQ_0, stream_dma_handler);
+    dma_channel_set_irq1_enabled(stream_dma0, false);
+    dma_channel_set_irq1_enabled(stream_dma1, false);
+    irq_remove_handler(DMA_IRQ_1, stream_dma_handler);
     dma_channel_unclaim(stream_dma0);
     dma_channel_unclaim(stream_dma1);
 

@@ -487,9 +487,10 @@ export class AnalyzerDriver {
    * @param {number[]} config.channels - channel numbers to capture
    * @param {number} config.frequency - sampling frequency in Hz
    * @param {(channels: Uint8Array[], chunkSamples: number) => void} onChunk
-   * @returns {Promise<{started: boolean, chunkSamples?: number, numChannels?: number, endStatus?: string}>}
+   * @param {(endStatus: string|null, error: string|null) => void} onEnd
+   * @returns {Promise<{started: boolean, chunkSamples?: number, numChannels?: number}>}
    */
-  async startStream(config, onChunk) {
+  async startStream(config, onChunk, onEnd) {
     if (this.#capturing || this.#previewing || this.#streaming) return { started: false }
     if (!this.#transport?.connected) return { started: false }
 
@@ -498,33 +499,43 @@ export class AnalyzerDriver {
     }
 
     try {
+      const reqBytes = buildStreamRequest({
+        channels: config.channels,
+        channelCount: config.channels.length,
+        frequency: config.frequency,
+      })
+      console.log(`[stream] request: channels=${JSON.stringify(config.channels)}, freq=${config.frequency}`)
+      console.log(`[stream] packet bytes [32..39]:`, Array.from(reqBytes.slice(32, 40)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '))
+
       const pkt = new OutputPacket()
       pkt.addByte(CMD_START_STREAM)
-      pkt.addBytes(
-        buildStreamRequest({
-          channels: config.channels,
-          channelCount: config.channels.length,
-          frequency: config.frequency,
-        }),
-      )
+      pkt.addBytes(reqBytes)
       await this.#transport.write(pkt.serialize())
 
-      const response = await this.#transport.readLine()
+      // Read lines until we get STREAM_STARTED (skip debug output)
+      let response
+      for (let i = 0; i < 10; i++) {
+        response = await this.#transport.readLine()
+        console.log(`[stream] device: "${response}"`)
+        if (response === 'STREAM_STARTED') break
+      }
       if (response !== 'STREAM_STARTED') return { started: false }
 
       // Read 4-byte info header: [chunkSamples LE16][numChannels u8][reserved u8]
       const info = await this.#transport.readBytes(4)
       const chunkSamples = info[0] | (info[1] << 8)
       const numChannels = info[2]
+      console.log(`[stream] info: chunkSamples=${chunkSamples}, numChannels=${numChannels}`)
 
       this.#streaming = true
 
       // Fire-and-forget the read loop
       this.#streamEndStatus = null
-      this.#readStreamLoop(numChannels, chunkSamples, onChunk)
+      this.#readStreamLoop(numChannels, chunkSamples, onChunk, onEnd)
 
       return { started: true, chunkSamples, numChannels }
-    } catch {
+    } catch (err) {
+      console.error('[stream] startStream error:', err)
       return { started: false }
     }
   }
@@ -534,8 +545,10 @@ export class AnalyzerDriver {
   /**
    * Internal async loop that reads compressed stream chunks until EOF.
    */
-  async #readStreamLoop(numChannels, chunkSamples, onChunk) {
+  async #readStreamLoop(numChannels, chunkSamples, onChunk, onEnd) {
+    let chunksReceived = 0
     try {
+      console.log(`[stream] read loop started: ${numChannels}ch, ${chunkSamples} samples/chunk`)
       while (true) {
         const sizeBytes = await this.#transport.readBytes(2)
         const compressedSize = sizeBytes[0] | (sizeBytes[1] << 8)
@@ -543,16 +556,23 @@ export class AnalyzerDriver {
 
         const compressed = await this.#transport.readBytes(compressedSize)
         const { channels } = decompressChunk(compressed, numChannels, chunkSamples)
+        chunksReceived++
+        if (chunksReceived <= 3) {
+          console.log(`[stream] chunk #${chunksReceived}: ${compressedSize} bytes compressed`)
+        }
         onChunk(channels, chunkSamples)
       }
 
       this.#streaming = false
+      console.log(`[stream] EOF received after ${chunksReceived} chunks`)
       const endLine = await this.#transport.readLine()
-      this.#streamEndStatus = endLine // "STREAM_DONE" or "STREAM_OVERFLOW"
-    } catch {
-      if (this.#streaming) {
-        this.#streaming = false
-      }
+      this.#streamEndStatus = endLine
+      console.log(`[stream] end status: ${endLine}`)
+      onEnd?.(endLine, null)
+    } catch (err) {
+      console.error(`[stream] read loop error after ${chunksReceived} chunks:`, err)
+      this.#streaming = false
+      onEnd?.(null, err?.message ?? 'Stream read error')
     }
   }
 
@@ -571,22 +591,27 @@ export class AnalyzerDriver {
       pkt.addByte(CMD_STOP_STREAM)
       await this.#transport.write(pkt.serialize())
 
-      // Wait for read loop to finish (it reads until EOF)
+      // Wait for read loop to finish (it reads until EOF + status line)
       const maxWait = 5000
       const start = Date.now()
       while (this.#streaming && Date.now() - start < maxWait) {
         await new Promise((r) => setTimeout(r, 50))
       }
 
-      const endStatus = this.#streamEndStatus
+      // Force cleanup if read loop didn't finish in time
+      if (this.#streaming) {
+        console.warn('[stream] read loop did not finish within timeout, reconnecting transport')
+        this.#streaming = false
+        try {
+          await this.#transport.disconnect()
+          await new Promise((r) => setTimeout(r, 100))
+          await this.#transport.connect()
+        } catch {
+          // Ignore reconnect errors
+        }
+      }
 
-      // Reconnect transport (same pattern as preview stop)
-      await new Promise((r) => setTimeout(r, 200))
-      await this.#transport.disconnect()
-      await new Promise((r) => setTimeout(r, 1))
-      await this.#transport.connect()
-
-      return { stopped: true, endStatus }
+      return { stopped: true, endStatus: this.#streamEndStatus }
     } catch {
       this.#streaming = false
       return { stopped: false }

@@ -1,9 +1,9 @@
 <template>
-  <div class="waveform-viewer" :class="{ 'with-led-strip': preview.isPreviewing }">
+  <div class="waveform-viewer" :class="{ 'with-led-strip': stream.isStreaming }">
     <div class="wv-corner" />
     <TimelineRuler class="wv-timeline" />
 
-    <PreviewLedStrip v-if="preview.isPreviewing" class="wv-led-strip" />
+    <PreviewLedStrip v-if="stream.isStreaming" class="wv-led-strip" />
 
     <div class="wv-channels">
       <ChannelLabels class="wv-labels" :channel-height="channelHeight" />
@@ -51,15 +51,15 @@
         @click="viewport.fitAll()"
       />
       <q-btn
-        v-if="preview.isPreviewing"
+        v-if="stream.isStreaming"
         flat
         dense
         round
         size="sm"
-        :icon="preview.following ? 'gps_fixed' : 'gps_not_fixed'"
-        :color="preview.following ? 'positive' : 'grey-4'"
+        :icon="stream.following ? 'gps_fixed' : 'gps_not_fixed'"
+        :color="stream.following ? 'positive' : 'grey-4'"
         title="Follow latest data"
-        @click="preview.following = !preview.following"
+        @click="stream.following = !stream.following"
       />
     </div>
   </div>
@@ -69,7 +69,7 @@
 import { ref, computed, watch } from 'vue'
 import { useViewportStore } from 'src/stores/viewport.js'
 import { useCapture } from 'src/composables/useCapture.js'
-import { usePreview } from 'src/composables/usePreview.js'
+import { useStream } from 'src/composables/useStream.js'
 import { MIN_CHANNEL_HEIGHT } from 'src/core/renderer/waveform-renderer.js'
 import TimelineRuler from './TimelineRuler.vue'
 import ChannelLabels from './ChannelLabels.vue'
@@ -78,7 +78,7 @@ import PreviewLedStrip from 'src/components/preview/PreviewLedStrip.vue'
 
 const viewport = useViewportStore()
 const cap = useCapture()
-const preview = usePreview()
+const stream = useStream()
 
 const channelHeight = ref(MIN_CHANNEL_HEIGHT)
 
@@ -87,7 +87,7 @@ const scrollMax = computed(() => Math.max(0, viewport.totalSamples - viewport.vi
 const scrollStep = computed(() => Math.max(1, Math.floor(viewport.visibleSamples * 0.01)))
 
 function onScrollChange(val) {
-  if (preview.isPreviewing) preview.following = false
+  if (stream.isStreaming) stream.following = false
   viewport.setView(val, viewport.visibleSamples)
 }
 
