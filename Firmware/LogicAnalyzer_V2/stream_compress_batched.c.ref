@@ -1,0 +1,894 @@
+/*
+ * stream_compress_batched.c
+ *
+ * Multi-phase batched compression for streaming logic analyzer data on RP2350.
+ * Runs on Core 1 while Core 0 handles USB/WiFi commands.
+ *
+ * ============================================================================
+ * ARCHITECTURE OVERVIEW
+ * ============================================================================
+ *
+ * The key insight driving this design: processing an entire 4KB DMA buffer as
+ * one batch through distinct phases yields far better throughput than processing
+ * each 256-sample chunk independently. The reasons are:
+ *
+ *   1. CACHE BEHAVIOR: The Cortex-M33 has no data cache, but sequential memory
+ *      access patterns keep the AHB bus pipeline saturated. Random access
+ *      patterns cause pipeline stalls. By separating bit-transpose from
+ *      classification from encoding, each phase sweeps linearly through memory.
+ *
+ *   2. BRANCH PREDICTION: Each phase has a tight, predictable inner loop.
+ *      Mixing classification logic with encoding logic creates unpredictable
+ *      branches that stall the 3-stage M33 pipeline.
+ *
+ *   3. NO INTERMEDIATE COPIES: Phase outputs are written directly into the
+ *      buffers that the next phase reads. The transposed bits go into a
+ *      contiguous array that the classifier reads sequentially, and the
+ *      classifier's verdicts (stored as 2-bit codes) directly become the
+ *      output headers.
+ *
+ *   4. MEMORY LAYOUT: All working buffers are sized and aligned for the worst
+ *      case. The transposed buffer is laid out as [chunk0_ch0][chunk0_ch1]...
+ *      [chunk0_chN][chunk1_ch0]... so that each phase processes data in the
+ *      order it was written by the previous phase.
+ *
+ * ============================================================================
+ * PROCESSING PHASES
+ * ============================================================================
+ *
+ *   Phase 1 - Bit Transpose (entire 4KB buffer, all chunks, all channels)
+ *     Input:  Interleaved DMA samples (1/2/4 bytes per sample depending on mode)
+ *     Output: Per-channel bit arrays, 32 bytes (256 bits) per channel per chunk
+ *     Layout: transposed[chunk_idx * num_channels + channel_idx] = 32 bytes
+ *
+ *   Phase 2 - Classify (scan all transposed channel data)
+ *     Input:  Transposed bit arrays from Phase 1
+ *     Output: 2-bit header code per channel per chunk
+ *             00 = raw, 01 = all-zeros, 10 = all-ones, 11 = nibble-encoded
+ *     Decision: Check if all 32 bytes are 0x00, all 0xFF, or mixed.
+ *               For mixed: estimate whether nibble encoding saves space.
+ *
+ *   Phase 3 - Encode (only channels marked 00 or 11)
+ *     Input:  Transposed bit arrays + classification verdicts
+ *     Output: Packed output packets ready for USB CDC transfer
+ *     For raw (00): copy 32 bytes verbatim
+ *     For nibble (11): apply prefix-code nibble compression
+ *     For all-zeros/all-ones (01/10): nothing emitted
+ *
+ * ============================================================================
+ * DATA FLOW
+ * ============================================================================
+ *
+ *   DMA buffer (4KB)
+ *       |
+ *       v
+ *   [Phase 1: transpose_all_chunks]
+ *       |  writes to transposed_buf[]
+ *       v
+ *   [Phase 2: classify_all_chunks]
+ *       |  writes to chunk_headers[]
+ *       v
+ *   [Phase 3: encode_all_chunks]
+ *       |  writes to output_buf[]
+ *       v
+ *   Ready for cdc_transfer()
+ *
+ * ============================================================================
+ */
+
+#include "LogicAnalyzer_Board_Settings.h"
+#include "LogicAnalyzer_Capture.h"
+#include <string.h>
+
+/* ---------------------------------------------------------------------------
+ * Constants
+ * ---------------------------------------------------------------------------*/
+
+/* Samples per compression chunk. The compression scheme operates on 256-sample
+ * blocks: 256 bits = 32 bytes per channel per chunk. */
+#define CHUNK_SAMPLES       256
+
+/* Bytes of channel data per chunk (256 bits = 32 bytes). */
+#define CHUNK_BYTES         (CHUNK_SAMPLES / 8)
+
+/* DMA buffer size. Two of these exist for ping-pong. */
+#define DMA_BUF_SIZE        4096
+
+/* Maximum chunks per DMA buffer (8-channel mode: 4096 / 256 = 16). */
+#define MAX_CHUNKS_PER_BUF  (DMA_BUF_SIZE / CHUNK_SAMPLES)
+
+/* Maximum number of channels supported. */
+#define MAX_CH              MAX_CHANNELS
+
+/* Maximum transposed data: 16 chunks * 24 channels * 32 bytes = 12,288 bytes.
+ * This is the worst case (8-channel mode gives 16 chunks, 24-channel mode
+ * gives only 4 chunks but at 4 bytes/sample). Actual usage depends on the
+ * active channel count and mode. */
+#define TRANSPOSED_BUF_SIZE (MAX_CHUNKS_PER_BUF * MAX_CH * CHUNK_BYTES)
+
+/* Worst-case output size per chunk: header + all channels raw.
+ * Header: ceil(MAX_CH/4) = 6 bytes. Data: MAX_CH * 32 = 768 bytes.
+ * Per chunk worst case: 774 bytes. For 16 chunks: 12,384 bytes.
+ * Nibble encoding can expand data in pathological cases (each nibble
+ * preceded by a 4-bit prefix), but we cap output and fall back to raw
+ * when encoding would expand. So worst case per channel is 32 bytes raw. */
+#define MAX_HEADER_BYTES    ((MAX_CH + 3) / 4)
+#define MAX_OUTPUT_PER_CHUNK (MAX_HEADER_BYTES + MAX_CH * CHUNK_BYTES)
+#define OUTPUT_BUF_SIZE     (MAX_CHUNKS_PER_BUF * MAX_OUTPUT_PER_CHUNK)
+
+/* ---------------------------------------------------------------------------
+ * Header codes (2 bits per channel)
+ * ---------------------------------------------------------------------------*/
+#define HDR_RAW         0   /* 00: raw 32 bytes follow */
+#define HDR_ALL_ZEROS   1   /* 01: no data, channel is all zeros */
+#define HDR_ALL_ONES    2   /* 10: no data, channel is all ones */
+#define HDR_NIBBLE_ENC  3   /* 11: nibble-encoded data follows */
+
+/* ---------------------------------------------------------------------------
+ * Nibble prefix codes (4 bits each)
+ *
+ * These encode runs and raw spans of 4-bit nibbles. The 256-bit channel data
+ * is treated as 64 nibbles (MSN first within each byte, matching the natural
+ * order for sequential decoding).
+ * ---------------------------------------------------------------------------*/
+#define NPC_RAW_1       0x0     /* next 1 nibble is raw */
+#define NPC_RAW_2       0x1     /* next 2 nibbles are raw */
+#define NPC_RAW_3       0x2     /* next 3 nibbles are raw */
+#define NPC_RAW_6       0x3     /* next 6 nibbles are raw (fills gap) */
+#define NPC_RAW_4       0x4     /* next 4 nibbles are raw */
+#define NPC_RAW_8       0x5     /* next 8 nibbles are raw */
+#define NPC_ZERO_2      0x6     /* next 2 nibbles are 0x0 */
+#define NPC_ZERO_4      0x7     /* next 4 nibbles are 0x0 */
+#define NPC_ZERO_8      0x8     /* next 8 nibbles are 0x0 */
+#define NPC_ZERO_16     0x9     /* next 16 nibbles are 0x0 */
+#define NPC_ZERO_32     0xA     /* next 32 nibbles are 0x0 */
+#define NPC_ONE_2       0xB     /* next 2 nibbles are 0xF */
+#define NPC_ONE_4       0xC     /* next 4 nibbles are 0xF */
+#define NPC_ONE_8       0xD     /* next 8 nibbles are 0xF */
+#define NPC_ONE_16      0xE     /* next 16 nibbles are 0xF */
+#define NPC_ONE_32      0xF     /* next 32 nibbles are 0xF */
+
+/* ---------------------------------------------------------------------------
+ * Static working buffers
+ *
+ * These are statically allocated to avoid stack pressure on Core 1 (which
+ * typically has a limited stack) and to guarantee alignment.
+ *
+ * MEMORY LAYOUT RATIONALE:
+ * transposed_buf is laid out in chunk-major order:
+ *   [chunk0_ch0 (32B)][chunk0_ch1 (32B)]...[chunk0_chN (32B)]
+ *   [chunk1_ch0 (32B)][chunk1_ch1 (32B)]...[chunk1_chN (32B)]
+ *   ...
+ * This means Phase 1 writes sequentially within each chunk (good for the
+ * write stream), and Phase 2 reads sequentially across all channels of one
+ * chunk before moving to the next (good locality for classification).
+ * ---------------------------------------------------------------------------*/
+
+/* Transposed per-channel bit data. */
+static uint8_t transposed_buf[TRANSPOSED_BUF_SIZE] __attribute__((aligned(4)));
+
+/* Per-chunk, per-channel classification: 2-bit codes packed into bytes. */
+static uint8_t chunk_headers[MAX_CHUNKS_PER_BUF][MAX_HEADER_BYTES];
+
+/* Output buffer for encoded stream packets. */
+static uint8_t output_buf[OUTPUT_BUF_SIZE] __attribute__((aligned(4)));
+
+/* Per-chunk output sizes (set by Phase 3 so the caller knows packet boundaries). */
+static uint32_t chunk_output_sizes[MAX_CHUNKS_PER_BUF];
+
+
+/* ===========================================================================
+ * PHASE 1: BIT TRANSPOSE
+ *
+ * Extract each channel's bits from interleaved DMA samples. Processes the
+ * entire buffer in one pass to maintain sequential read access on the DMA
+ * buffer and sequential write access on the transposed buffer.
+ *
+ * For 8-channel mode, each sample is 1 byte with bits [7:0] mapping to
+ * channels [7:0]. We need to turn N consecutive samples into per-channel
+ * bit streams where channel C gets bit C from each sample, packed 8 samples
+ * per byte.
+ *
+ * For 16-channel mode, each sample is 2 bytes (little-endian uint16_t).
+ * For 24-channel mode, each sample is 4 bytes (little-endian uint32_t,
+ * upper 8 bits are padding/unused depending on pin mapping).
+ *
+ * The transpose is done 8 samples at a time. For each group of 8 samples,
+ * we extract bit C from each sample to form one output byte for channel C.
+ * This processes 256 samples (one chunk) in 32 iterations of the 8-sample
+ * inner loop.
+ * ===========================================================================*/
+
+/*
+ * transpose_8ch_batch - Transpose all chunks for 8-channel mode.
+ *
+ * Each DMA byte is one sample with 8 channels interleaved as bits [7:0].
+ * We process 8 samples at a time to produce one output byte per channel.
+ *
+ * @param dma_buf    Pointer to the completed DMA buffer (4096 bytes = 4096 samples).
+ * @param num_chunks Number of 256-sample chunks in the buffer.
+ * @param num_ch     Number of active channels (1-8).
+ */
+static void transpose_8ch_batch(const uint8_t *dma_buf,
+                                uint32_t num_chunks,
+                                uint32_t num_ch)
+{
+    for (uint32_t chunk = 0; chunk < num_chunks; chunk++) {
+        /* Pointer to the start of this chunk in the DMA buffer. */
+        const uint8_t *src = dma_buf + chunk * CHUNK_SAMPLES;
+
+        /* Pointer to the start of this chunk's transposed output.
+         * Layout: chunk_base + channel_idx * CHUNK_BYTES. */
+        uint8_t *chunk_base = transposed_buf + chunk * num_ch * CHUNK_BYTES;
+
+        /* Process 256 samples in groups of 8. Each group produces one byte
+         * per channel (bit C from each of the 8 samples). */
+        for (uint32_t group = 0; group < CHUNK_BYTES; group++) {
+            /* Load 8 consecutive samples. On Cortex-M33, individual byte loads
+             * from sequential addresses are efficient thanks to the AHB pipeline. */
+            const uint8_t *s = src + group * 8;
+            uint8_t s0 = s[0], s1 = s[1], s2 = s[2], s3 = s[3];
+            uint8_t s4 = s[4], s5 = s[5], s6 = s[6], s7 = s[7];
+
+            /* For each active channel, extract bit C from each sample and pack
+             * into one output byte. Bit 0 of the output byte corresponds to
+             * the earliest sample (s0), bit 7 to the latest (s7). */
+            for (uint32_t ch = 0; ch < num_ch; ch++) {
+                uint8_t mask = 1u << ch;
+                uint8_t out = 0;
+                if (s0 & mask) out |= 0x01;
+                if (s1 & mask) out |= 0x02;
+                if (s2 & mask) out |= 0x04;
+                if (s3 & mask) out |= 0x08;
+                if (s4 & mask) out |= 0x10;
+                if (s5 & mask) out |= 0x20;
+                if (s6 & mask) out |= 0x40;
+                if (s7 & mask) out |= 0x80;
+                chunk_base[ch * CHUNK_BYTES + group] = out;
+            }
+        }
+    }
+}
+
+/*
+ * transpose_16ch_batch - Transpose all chunks for 16-channel mode.
+ *
+ * Each DMA sample is 2 bytes (uint16_t, little-endian). 4096 bytes = 2048
+ * samples = 8 chunks.
+ */
+static void transpose_16ch_batch(const uint8_t *dma_buf,
+                                 uint32_t num_chunks,
+                                 uint32_t num_ch)
+{
+    const uint16_t *src16 = (const uint16_t *)dma_buf;
+
+    for (uint32_t chunk = 0; chunk < num_chunks; chunk++) {
+        const uint16_t *src = src16 + chunk * CHUNK_SAMPLES;
+        uint8_t *chunk_base = transposed_buf + chunk * num_ch * CHUNK_BYTES;
+
+        for (uint32_t group = 0; group < CHUNK_BYTES; group++) {
+            const uint16_t *s = src + group * 8;
+            uint16_t s0 = s[0], s1 = s[1], s2 = s[2], s3 = s[3];
+            uint16_t s4 = s[4], s5 = s[5], s6 = s[6], s7 = s[7];
+
+            for (uint32_t ch = 0; ch < num_ch; ch++) {
+                uint16_t mask = 1u << ch;
+                uint8_t out = 0;
+                if (s0 & mask) out |= 0x01;
+                if (s1 & mask) out |= 0x02;
+                if (s2 & mask) out |= 0x04;
+                if (s3 & mask) out |= 0x08;
+                if (s4 & mask) out |= 0x10;
+                if (s5 & mask) out |= 0x20;
+                if (s6 & mask) out |= 0x40;
+                if (s7 & mask) out |= 0x80;
+                chunk_base[ch * CHUNK_BYTES + group] = out;
+            }
+        }
+    }
+}
+
+/*
+ * transpose_24ch_batch - Transpose all chunks for 24-channel mode.
+ *
+ * Each DMA sample is 4 bytes (uint32_t, little-endian). Only bits [23:0] are
+ * meaningful (24 channels). 4096 bytes = 1024 samples = 4 chunks.
+ */
+static void transpose_24ch_batch(const uint8_t *dma_buf,
+                                 uint32_t num_chunks,
+                                 uint32_t num_ch)
+{
+    const uint32_t *src32 = (const uint32_t *)dma_buf;
+
+    for (uint32_t chunk = 0; chunk < num_chunks; chunk++) {
+        const uint32_t *src = src32 + chunk * CHUNK_SAMPLES;
+        uint8_t *chunk_base = transposed_buf + chunk * num_ch * CHUNK_BYTES;
+
+        for (uint32_t group = 0; group < CHUNK_BYTES; group++) {
+            const uint32_t *s = src + group * 8;
+            uint32_t s0 = s[0], s1 = s[1], s2 = s[2], s3 = s[3];
+            uint32_t s4 = s[4], s5 = s[5], s6 = s[6], s7 = s[7];
+
+            for (uint32_t ch = 0; ch < num_ch; ch++) {
+                uint32_t mask = 1u << ch;
+                uint8_t out = 0;
+                if (s0 & mask) out |= 0x01;
+                if (s1 & mask) out |= 0x02;
+                if (s2 & mask) out |= 0x04;
+                if (s3 & mask) out |= 0x08;
+                if (s4 & mask) out |= 0x10;
+                if (s5 & mask) out |= 0x20;
+                if (s6 & mask) out |= 0x40;
+                if (s7 & mask) out |= 0x80;
+                chunk_base[ch * CHUNK_BYTES + group] = out;
+            }
+        }
+    }
+}
+
+
+/* ===========================================================================
+ * PHASE 2: CLASSIFY
+ *
+ * Scan every channel's 32 transposed bytes to determine the optimal encoding.
+ * This is a simple linear scan -- no branches except the final classification
+ * decision. Processing all channels across all chunks in one sweep means the
+ * transposed_buf is read exactly once, sequentially.
+ *
+ * Classification rules:
+ *   - If all 32 bytes == 0x00: HDR_ALL_ZEROS (saves 32 bytes, zero output)
+ *   - If all 32 bytes == 0xFF: HDR_ALL_ONES  (saves 32 bytes, zero output)
+ *   - Otherwise: estimate nibble encoding cost.
+ *     - If nibble encoding would save space: HDR_NIBBLE_ENC
+ *     - Otherwise: HDR_RAW (32 bytes verbatim)
+ *
+ * The nibble encoding cost estimate counts runs of zero-nibbles, one-nibbles,
+ * and non-run nibbles to predict the encoded size without actually encoding.
+ * This avoids wasted work on channels where raw is cheaper.
+ * ===========================================================================*/
+
+/*
+ * estimate_nibble_cost - Estimate the encoded size in nibbles (4-bit units)
+ * for a 32-byte (64-nibble) channel block.
+ *
+ * Returns the estimated number of output nibbles. If this exceeds 64 (the raw
+ * size in nibbles, i.e., 32 bytes), then raw encoding is cheaper.
+ *
+ * The estimation works by scanning the 64 nibbles and greedily matching the
+ * longest run codes first (32, 16, 8, 4, 2 for zeros/ones), then counting
+ * remaining non-run nibbles and assigning them the best raw prefix code.
+ */
+static uint32_t estimate_nibble_cost(const uint8_t *data)
+{
+    /* Extract all 64 nibbles into a flat array for easy scanning.
+     * nibbles[0] = high nibble of data[0], nibbles[1] = low nibble of data[0],
+     * nibbles[2] = high nibble of data[1], etc.
+     *
+     * Within each byte, the high nibble represents the earlier 4 samples
+     * (samples 0-3 packed as bits [3:0] in time order), and the low nibble
+     * represents the later 4 samples (samples 4-7). This matches the
+     * transposed bit order where bit 0 = earliest sample. */
+    uint8_t nibs[64];
+    for (uint32_t i = 0; i < 32; i++) {
+        nibs[i * 2]     = (data[i] >> 4) & 0x0F;
+        nibs[i * 2 + 1] = data[i] & 0x0F;
+    }
+
+    uint32_t cost_nibbles = 0;  /* Total output nibbles (prefixes + raw data) */
+    uint32_t pos = 0;
+
+    while (pos < 64) {
+        uint8_t nib = nibs[pos];
+
+        if (nib == 0x0 || nib == 0xF) {
+            /* Count consecutive run of this value. */
+            uint32_t run = 0;
+            uint8_t val = nib;
+            while (pos + run < 64 && nibs[pos + run] == val)
+                run++;
+
+            /* Greedily consume the run using the largest codes first.
+             * Available run lengths: 32, 16, 8, 4, 2.
+             * Each run code costs exactly 1 nibble (the prefix). */
+            while (run >= 2) {
+                if (run >= 32) {
+                    cost_nibbles += 1;  /* prefix for run-32 */
+                    run -= 32;
+                    pos += 32;
+                } else if (run >= 16) {
+                    cost_nibbles += 1;
+                    run -= 16;
+                    pos += 16;
+                } else if (run >= 8) {
+                    cost_nibbles += 1;
+                    run -= 8;
+                    pos += 8;
+                } else if (run >= 4) {
+                    cost_nibbles += 1;
+                    run -= 4;
+                    pos += 4;
+                } else { /* run >= 2 */
+                    cost_nibbles += 1;
+                    run -= 2;
+                    pos += 2;
+                }
+            }
+            /* If 1 leftover nibble from the run, it must be sent as raw. */
+            if (run == 1) {
+                /* 1 raw nibble: prefix (1) + data (1) = 2 nibbles. */
+                cost_nibbles += 2;
+                pos += 1;
+            }
+        } else {
+            /* Non-run nibble. Count consecutive non-run nibbles to pick the
+             * best raw prefix code. Available raw lengths: 8, 6, 4, 3, 2, 1.
+             * Each costs: prefix (1 nibble) + N data nibbles. */
+            uint32_t raw_run = 0;
+            while (pos + raw_run < 64) {
+                uint8_t n = nibs[pos + raw_run];
+                /* Stop if we hit a run of 2+ zeros or ones -- those are
+                 * better encoded as run codes. */
+                if ((n == 0x0 || n == 0xF) && (pos + raw_run + 1 < 64) &&
+                    nibs[pos + raw_run + 1] == n) {
+                    break;
+                }
+                raw_run++;
+                /* Don't look ahead too far; the largest raw code is 8. */
+                if (raw_run >= 8)
+                    break;
+            }
+            /* Emit using the best fitting raw code. */
+            while (raw_run > 0) {
+                if (raw_run >= 8) {
+                    cost_nibbles += 1 + 8;
+                    raw_run -= 8;
+                    pos += 8;
+                } else if (raw_run >= 6) {
+                    cost_nibbles += 1 + 6;
+                    raw_run -= 6;
+                    pos += 6;
+                } else if (raw_run >= 4) {
+                    cost_nibbles += 1 + 4;
+                    raw_run -= 4;
+                    pos += 4;
+                } else if (raw_run >= 3) {
+                    cost_nibbles += 1 + 3;
+                    raw_run -= 3;
+                    pos += 3;
+                } else if (raw_run >= 2) {
+                    cost_nibbles += 1 + 2;
+                    raw_run -= 2;
+                    pos += 2;
+                } else {
+                    cost_nibbles += 1 + 1;
+                    raw_run -= 1;
+                    pos += 1;
+                }
+            }
+        }
+    }
+
+    return cost_nibbles;
+}
+
+/*
+ * classify_all_chunks - Classify every channel in every chunk.
+ *
+ * Writes 2-bit header codes into chunk_headers[][] and returns nothing.
+ * The header bytes are packed 4 channels per byte, with channel 0 in bits
+ * [1:0], channel 1 in bits [3:2], etc.
+ */
+static void classify_all_chunks(uint32_t num_chunks, uint32_t num_ch)
+{
+    uint32_t header_bytes = (num_ch + 3) / 4;
+
+    for (uint32_t chunk = 0; chunk < num_chunks; chunk++) {
+        /* Clear the header for this chunk. */
+        memset(chunk_headers[chunk], 0, header_bytes);
+
+        for (uint32_t ch = 0; ch < num_ch; ch++) {
+            const uint8_t *ch_data = transposed_buf
+                + chunk * num_ch * CHUNK_BYTES
+                + ch * CHUNK_BYTES;
+
+            /* OR and AND all 32 bytes together. Using uint32_t reads for speed
+             * (the transposed buffer is 4-byte aligned, and CHUNK_BYTES=32 is
+             * a multiple of 4). */
+            const uint32_t *words = (const uint32_t *)ch_data;
+            uint32_t or_all  = 0;
+            uint32_t and_all = 0xFFFFFFFF;
+
+            for (uint32_t w = 0; w < CHUNK_BYTES / 4; w++) {
+                or_all  |= words[w];
+                and_all &= words[w];
+            }
+
+            uint8_t code;
+            if (or_all == 0) {
+                code = HDR_ALL_ZEROS;
+            } else if (and_all == 0xFFFFFFFF) {
+                code = HDR_ALL_ONES;
+            } else {
+                /* Estimate nibble encoding cost (in nibble units).
+                 * Raw costs 64 nibbles (32 bytes). If nibble encoding costs
+                 * fewer nibbles, use it. */
+                uint32_t enc_cost = estimate_nibble_cost(ch_data);
+                /* enc_cost is in nibbles. Raw is 64 nibbles. Use nibble
+                 * encoding only if it's strictly smaller. */
+                if (enc_cost < 64) {
+                    code = HDR_NIBBLE_ENC;
+                } else {
+                    code = HDR_RAW;
+                }
+            }
+
+            /* Pack the 2-bit code into the header byte. */
+            uint32_t byte_idx = ch / 4;
+            uint32_t bit_shift = (ch % 4) * 2;
+            chunk_headers[chunk][byte_idx] |= (code << bit_shift);
+        }
+    }
+}
+
+
+/* ===========================================================================
+ * PHASE 3: ENCODE
+ *
+ * Produce the final output packets. For each chunk, emit the header bytes
+ * followed by each channel's encoded data (or nothing for all-zeros/all-ones).
+ *
+ * The nibble encoder uses a bit-writer that packs nibbles into bytes in
+ * big-endian nibble order (high nibble first). This matches the natural
+ * decoding order.
+ * ===========================================================================*/
+
+/*
+ * Bit writer for nibble-aligned output. Accumulates nibbles and flushes
+ * complete bytes. Operates on a destination byte array.
+ */
+typedef struct {
+    uint8_t *buf;       /* Output buffer pointer */
+    uint32_t pos;       /* Current byte position in buf */
+    bool     high;      /* true = next nibble goes to high nibble of buf[pos] */
+} nibble_writer_t;
+
+static inline void nw_init(nibble_writer_t *nw, uint8_t *buf)
+{
+    nw->buf  = buf;
+    nw->pos  = 0;
+    nw->high = true;
+}
+
+/* Write a single 4-bit nibble. */
+static inline void nw_put(nibble_writer_t *nw, uint8_t nibble)
+{
+    if (nw->high) {
+        nw->buf[nw->pos] = (nibble & 0x0F) << 4;
+        nw->high = false;
+    } else {
+        nw->buf[nw->pos] |= (nibble & 0x0F);
+        nw->pos++;
+        nw->high = true;
+    }
+}
+
+/* Return the total number of bytes written (rounds up if a partial byte exists). */
+static inline uint32_t nw_size(const nibble_writer_t *nw)
+{
+    return nw->high ? nw->pos : nw->pos + 1;
+}
+
+/*
+ * nibble_encode_channel - Nibble-encode 32 bytes (64 nibbles) of channel data.
+ *
+ * @param data   Input: 32 bytes of transposed channel data.
+ * @param out    Output buffer (must have space for worst-case expansion).
+ * @return       Number of bytes written to out.
+ *
+ * The encoder uses a greedy strategy: at each position, find the longest
+ * matching run code (zeros or ones), or gather the longest raw span before
+ * the next run opportunity.
+ */
+static uint32_t nibble_encode_channel(const uint8_t *data, uint8_t *out)
+{
+    /* Extract nibbles. */
+    uint8_t nibs[64];
+    for (uint32_t i = 0; i < 32; i++) {
+        nibs[i * 2]     = (data[i] >> 4) & 0x0F;
+        nibs[i * 2 + 1] = data[i] & 0x0F;
+    }
+
+    nibble_writer_t nw;
+    nw_init(&nw, out);
+
+    uint32_t pos = 0;
+
+    while (pos < 64) {
+        uint8_t nib = nibs[pos];
+
+        if (nib == 0x0 || nib == 0xF) {
+            /* Count consecutive run of this value. */
+            uint32_t run = 0;
+            uint8_t val = nib;
+            while (pos + run < 64 && nibs[pos + run] == val)
+                run++;
+
+            /* Emit run codes greedily, largest first. */
+            uint8_t prefix_base = (val == 0x0) ? NPC_ZERO_2 : NPC_ONE_2;
+            /* Run code lengths and their prefix offsets from the base:
+             * length 32 -> base+4, length 16 -> base+3, length 8 -> base+2,
+             * length 4 -> base+1, length 2 -> base+0. */
+
+            while (run >= 2) {
+                if (run >= 32) {
+                    nw_put(&nw, prefix_base + 4);
+                    run -= 32;
+                    pos += 32;
+                } else if (run >= 16) {
+                    nw_put(&nw, prefix_base + 3);
+                    run -= 16;
+                    pos += 16;
+                } else if (run >= 8) {
+                    nw_put(&nw, prefix_base + 2);
+                    run -= 8;
+                    pos += 8;
+                } else if (run >= 4) {
+                    nw_put(&nw, prefix_base + 1);
+                    run -= 4;
+                    pos += 4;
+                } else { /* run >= 2 */
+                    nw_put(&nw, prefix_base);
+                    run -= 2;
+                    pos += 2;
+                }
+            }
+            /* 1 leftover from a run must be emitted as raw. */
+            if (run == 1) {
+                nw_put(&nw, NPC_RAW_1);
+                nw_put(&nw, nibs[pos]);
+                pos++;
+            }
+        } else {
+            /* Gather a raw span. Stop before a run of 2+ zeros or ones.
+             * We look ahead up to 8 nibbles (the largest raw code). */
+            uint32_t raw_start = pos;
+            uint32_t raw_run = 0;
+
+            while (pos + raw_run < 64 && raw_run < 8) {
+                uint8_t n = nibs[pos + raw_run];
+                /* Stop if this starts a run of 2+ identical zeros/ones. */
+                if ((n == 0x0 || n == 0xF) &&
+                    (pos + raw_run + 1 < 64) &&
+                    nibs[pos + raw_run + 1] == n) {
+                    break;
+                }
+                raw_run++;
+            }
+            /* If raw_run is 0 (shouldn't happen given the outer if), handle
+             * gracefully by emitting the single nibble as raw. */
+            if (raw_run == 0)
+                raw_run = 1;
+
+            /* Emit raw spans using the available code lengths: 8, 6, 4, 3, 2, 1.
+             * We greedily use the largest fitting code. */
+            while (raw_run > 0) {
+                uint8_t code;
+                uint32_t count;
+
+                if (raw_run >= 8) {
+                    code = NPC_RAW_8; count = 8;
+                } else if (raw_run >= 6) {
+                    code = NPC_RAW_6; count = 6;
+                } else if (raw_run >= 4) {
+                    code = NPC_RAW_4; count = 4;
+                } else if (raw_run >= 3) {
+                    code = NPC_RAW_3; count = 3;
+                } else if (raw_run >= 2) {
+                    code = NPC_RAW_2; count = 2;
+                } else {
+                    code = NPC_RAW_1; count = 1;
+                }
+
+                nw_put(&nw, code);
+                for (uint32_t i = 0; i < count; i++) {
+                    nw_put(&nw, nibs[pos]);
+                    pos++;
+                }
+                raw_run -= count;
+            }
+        }
+    }
+
+    return nw_size(&nw);
+}
+
+/*
+ * encode_all_chunks - Encode all chunks into the output buffer.
+ *
+ * For each chunk, writes:
+ *   1. Header bytes (ceil(num_ch/4) bytes, 2 bits per channel)
+ *   2. Per-channel data:
+ *      - HDR_RAW: 32 bytes copied verbatim from transposed_buf
+ *      - HDR_ALL_ZEROS / HDR_ALL_ONES: nothing
+ *      - HDR_NIBBLE_ENC: nibble-encoded data
+ *
+ * @param num_chunks  Number of chunks to process.
+ * @param num_ch      Number of active channels.
+ * @return            Total bytes written to output_buf.
+ *
+ * chunk_output_sizes[] is populated with the size of each chunk's packet
+ * so the caller can transfer them individually or as one contiguous block.
+ */
+static uint32_t encode_all_chunks(uint32_t num_chunks, uint32_t num_ch)
+{
+    uint32_t header_bytes = (num_ch + 3) / 4;
+    uint32_t total_out = 0;
+
+    for (uint32_t chunk = 0; chunk < num_chunks; chunk++) {
+        uint8_t *out = output_buf + total_out;
+        uint32_t chunk_out = 0;
+
+        /* Write the header. */
+        memcpy(out, chunk_headers[chunk], header_bytes);
+        chunk_out += header_bytes;
+
+        /* Write each channel's data. */
+        for (uint32_t ch = 0; ch < num_ch; ch++) {
+            uint32_t byte_idx = ch / 4;
+            uint32_t bit_shift = (ch % 4) * 2;
+            uint8_t code = (chunk_headers[chunk][byte_idx] >> bit_shift) & 0x03;
+
+            const uint8_t *ch_data = transposed_buf
+                + chunk * num_ch * CHUNK_BYTES
+                + ch * CHUNK_BYTES;
+
+            switch (code) {
+            case HDR_RAW:
+                memcpy(out + chunk_out, ch_data, CHUNK_BYTES);
+                chunk_out += CHUNK_BYTES;
+                break;
+
+            case HDR_ALL_ZEROS:
+            case HDR_ALL_ONES:
+                /* No data emitted for constant channels. */
+                break;
+
+            case HDR_NIBBLE_ENC: {
+                uint32_t enc_bytes = nibble_encode_channel(ch_data,
+                                                           out + chunk_out);
+                chunk_out += enc_bytes;
+                break;
+            }
+            }
+        }
+
+        chunk_output_sizes[chunk] = chunk_out;
+        total_out += chunk_out;
+    }
+
+    return total_out;
+}
+
+
+/* ===========================================================================
+ * PUBLIC API
+ * ===========================================================================*/
+
+/*
+ * compute_chunks_for_mode - Calculate how many 256-sample chunks fit in one
+ * DMA buffer for the given channel mode.
+ *
+ * 8-channel:  1 byte/sample  -> 4096 samples -> 16 chunks
+ * 16-channel: 2 bytes/sample -> 2048 samples ->  8 chunks
+ * 24-channel: 4 bytes/sample -> 1024 samples ->  4 chunks
+ */
+static uint32_t compute_chunks_for_mode(CHANNEL_MODE mode)
+{
+    switch (mode) {
+    case MODE_8_CHANNEL:  return DMA_BUF_SIZE / (1 * CHUNK_SAMPLES);
+    case MODE_16_CHANNEL: return DMA_BUF_SIZE / (2 * CHUNK_SAMPLES);
+    case MODE_24_CHANNEL: return DMA_BUF_SIZE / (4 * CHUNK_SAMPLES);
+    default:              return 0;
+    }
+}
+
+/*
+ * compute_num_channels - Return the number of active channels for a mode.
+ */
+static uint32_t compute_num_channels(CHANNEL_MODE mode)
+{
+    switch (mode) {
+    case MODE_8_CHANNEL:  return 8;
+    case MODE_16_CHANNEL: return 16;
+    case MODE_24_CHANNEL: return 24;
+    default:              return 0;
+    }
+}
+
+/*
+ * stream_compress_buffer - Compress an entire DMA buffer through the 3-phase
+ * pipeline.
+ *
+ * This is the main entry point, called by Core 1 when a DMA ping-pong buffer
+ * has completed. It processes the full buffer in batch, producing a contiguous
+ * output suitable for USB CDC transfer.
+ *
+ * @param dma_buf       Pointer to the completed DMA buffer (4096 bytes).
+ * @param dma_buf_size  Size of the DMA buffer in bytes (expected: 4096).
+ * @param mode          Channel mode (8/16/24).
+ * @param out_data      [out] Set to point to the compressed output buffer.
+ * @param out_size      [out] Set to the total compressed size in bytes.
+ * @param out_chunk_sizes [out] Set to point to the array of per-chunk sizes.
+ * @param out_num_chunks  [out] Set to the number of chunks processed.
+ */
+void stream_compress_buffer(const uint8_t *dma_buf,
+                            uint32_t dma_buf_size,
+                            CHANNEL_MODE mode,
+                            uint8_t **out_data,
+                            uint32_t *out_size,
+                            uint32_t **out_chunk_sizes,
+                            uint32_t *out_num_chunks)
+{
+    (void)dma_buf_size; /* Currently always 4096; kept for future flexibility. */
+
+    uint32_t num_chunks = compute_chunks_for_mode(mode);
+    uint32_t num_ch     = compute_num_channels(mode);
+
+    /* -----------------------------------------------------------------------
+     * Phase 1: Bit Transpose
+     *
+     * Sweep the entire DMA buffer once, writing transposed per-channel data
+     * into transposed_buf[]. The mode-specific function is chosen once here
+     * rather than branching inside the hot loop.
+     * -----------------------------------------------------------------------*/
+    switch (mode) {
+    case MODE_8_CHANNEL:
+        transpose_8ch_batch(dma_buf, num_chunks, num_ch);
+        break;
+    case MODE_16_CHANNEL:
+        transpose_16ch_batch(dma_buf, num_chunks, num_ch);
+        break;
+    case MODE_24_CHANNEL:
+        transpose_24ch_batch(dma_buf, num_chunks, num_ch);
+        break;
+    }
+
+    /* -----------------------------------------------------------------------
+     * Phase 2: Classify
+     *
+     * Read transposed_buf[] sequentially, write 2-bit verdicts into
+     * chunk_headers[][]. This phase touches every byte of transposed data
+     * exactly once and writes very little output (a few bytes of headers).
+     * -----------------------------------------------------------------------*/
+    classify_all_chunks(num_chunks, num_ch);
+
+    /* -----------------------------------------------------------------------
+     * Phase 3: Encode
+     *
+     * Read transposed_buf[] and chunk_headers[] to produce the final
+     * compressed output in output_buf[]. Channels classified as all-zeros or
+     * all-ones produce zero output bytes. Raw channels are memcpy'd. Nibble-
+     * encoded channels go through the prefix-code encoder.
+     * -----------------------------------------------------------------------*/
+    uint32_t total = encode_all_chunks(num_chunks, num_ch);
+
+    /* Return pointers to the output. */
+    *out_data        = output_buf;
+    *out_size        = total;
+    *out_chunk_sizes = chunk_output_sizes;
+    *out_num_chunks  = num_chunks;
+}
+
+/*
+ * stream_compress_get_max_output_size - Return the worst-case output size for
+ * the given mode. Useful for the caller to know whether the output buffer is
+ * large enough (it always is since we use static allocation, but this is
+ * useful for protocol-level sizing).
+ */
+uint32_t stream_compress_get_max_output_size(CHANNEL_MODE mode)
+{
+    uint32_t num_chunks = compute_chunks_for_mode(mode);
+    uint32_t num_ch     = compute_num_channels(mode);
+    uint32_t header_bytes = (num_ch + 3) / 4;
+    return num_chunks * (header_bytes + num_ch * CHUNK_BYTES);
+}

@@ -9,6 +9,9 @@ export const CMD_BLINK_LED_ON = 0x05
 export const CMD_BLINK_LED_OFF = 0x06
 export const CMD_START_PREVIEW = 0x07
 export const CMD_STOP_PREVIEW = 0x08
+export const CMD_COMPRESSION_TEST = 0x09
+export const CMD_START_STREAM = 0x0a
+export const CMD_STOP_STREAM = 0x0b
 export const CMD_STOP_CAPTURE = 0xff // raw byte, NOT framed in an OutputPacket
 
 // Packet framing bytes (AnalyzerDriverBase.cs OutputPacket.Serialize)

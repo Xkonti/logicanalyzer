@@ -8,6 +8,7 @@ export const useDeviceStore = defineStore('device', () => {
   const connected = ref(false)
   const capturing = ref(false)
   const previewing = ref(false)
+  const streaming = ref(false)
   const deviceInfo = ref(null)
   const error = ref(null)
 
@@ -55,6 +56,7 @@ export const useDeviceStore = defineStore('device', () => {
     connected.value = false
     capturing.value = false
     previewing.value = false
+    streaming.value = false
     deviceInfo.value = null
     error.value = null
   }
@@ -96,6 +98,7 @@ export const useDeviceStore = defineStore('device', () => {
     connected,
     capturing,
     previewing,
+    streaming,
     deviceInfo,
     error,
     version,

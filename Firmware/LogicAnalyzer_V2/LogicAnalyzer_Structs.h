@@ -54,6 +54,17 @@
         uint8_t samplesPerInterval;
     } PREVIEW_REQUEST;
 
+    //Stream request issued by the host computer for real-time compressed streaming
+    typedef struct _STREAM_REQUEST
+    {
+        //Channels to capture
+        uint8_t channels[32];
+        //Number of channels (1-24)
+        uint8_t channelCount;
+        //Sampling frequency in Hz
+        uint32_t frequency;
+    } STREAM_REQUEST;
+
     #ifdef USE_CYGW_WIFI
 
         typedef struct _WIFI_SETTINGS

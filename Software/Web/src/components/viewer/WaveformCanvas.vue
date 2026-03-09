@@ -13,7 +13,7 @@ import { ref, shallowRef, watchEffect, computed, onMounted, onBeforeUnmount } fr
 import { WaveformRenderer, MIN_CHANNEL_HEIGHT } from 'src/core/renderer/waveform-renderer.js'
 import { useViewportStore } from 'src/stores/viewport.js'
 import { useCapture } from 'src/composables/useCapture.js'
-import { usePreview } from 'src/composables/usePreview.js'
+import { useStream } from 'src/composables/useStream.js'
 
 const emit = defineEmits(['channel-height-update'])
 
@@ -23,10 +23,10 @@ const renderer = shallowRef(null)
 
 const viewport = useViewportStore()
 const cap = useCapture()
-const preview = usePreview()
+const stream = useStream()
 
 const activeChannels = computed(() => {
-  if (preview.isPreviewing) return preview.previewChannels
+  if (stream.isStreaming) return stream.streamChannels
   return cap.capturedChannels
 })
 
@@ -67,9 +67,9 @@ function mapRegions(regions) {
 function onWheel(event) {
   if (!renderer.value) return
 
-  // Disable follow on manual scroll/zoom during preview
-  if (preview.isPreviewing) {
-    preview.following = false
+  // Disable follow on manual scroll/zoom during stream
+  if (stream.isStreaming) {
+    stream.following = false
   }
 
   if (event.ctrlKey || event.metaKey) {
@@ -137,8 +137,8 @@ watchEffect(() => {
   if (!renderer.value) return
   renderer.value.setChannels(mapChannels(activeChannels.value))
   renderer.value.setViewport(viewport.firstSample, viewport.visibleSamples)
-  // Skip capture-specific markers during preview
-  if (preview.isPreviewing) {
+  // Skip capture-specific markers during stream
+  if (stream.isStreaming) {
     renderer.value.setPreTriggerSamples(0)
     renderer.value.setBursts([])
     renderer.value.setRegions([])

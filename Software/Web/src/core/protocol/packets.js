@@ -116,6 +116,37 @@ export function buildPreviewRequest(config) {
   return new Uint8Array(buffer)
 }
 
+/**
+ * Builds the 40-byte StreamRequest struct in little-endian format.
+ * Matches the C firmware STREAM_REQUEST with natural alignment:
+ *   offset 0:  uint8_t[32] channels (zero-padded)
+ *   offset 32: uint8_t channelCount
+ *   offset 33-35: padding
+ *   offset 36: uint32_t frequency (LE)
+ *
+ * @param {Object} config
+ * @param {number[]} config.channels - channel numbers (up to 32)
+ * @param {number} config.channelCount
+ * @param {number} config.frequency - sampling frequency in Hz
+ * @returns {Uint8Array} exactly 40 bytes
+ */
+export function buildStreamRequest(config) {
+  const buffer = new ArrayBuffer(40)
+  const view = new DataView(buffer)
+  const bytes = new Uint8Array(buffer)
+
+  // channels: 32-byte zero-padded array at offset 0
+  for (let i = 0; i < Math.min(config.channels.length, 32); i++) {
+    bytes[i] = config.channels[i]
+  }
+
+  view.setUint8(32, config.channelCount)
+  // offset 33-35: alignment padding (already zero)
+  view.setUint32(36, config.frequency, true) // little-endian
+
+  return new Uint8Array(buffer)
+}
+
 export function buildCaptureRequest(session) {
   const buffer = new ArrayBuffer(56)
   const view = new DataView(buffer)

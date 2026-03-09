@@ -17,6 +17,8 @@
 #include "tusb.h"
 #include "pico/unique_id.h"
 #include "pico/bootrom.h"
+#include "compress_test.h"
+#include "LogicAnalyzer_Stream.h"
 
 #ifdef WS2812_LED
     #include "LogicAnalyzer_W2812.h"
@@ -93,6 +95,8 @@ uint8_t bufferPos = 0;
 bool capturing = false;
 //Preview status
 bool previewing = false;
+//Streaming status
+bool streaming_active = false;
 PREVIEW_REQUEST previewReqData;
 
 bool blink = false;
@@ -300,6 +304,12 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                     case 1: //Capture request
 
+                        if(streaming_active)
+                        {
+                            sendResponse("ERR_BUSY\n", fromWiFi);
+                            break;
+                        }
+
                         if(previewing)
                             previewing = false;
 
@@ -430,7 +440,7 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                     case 7: //Start preview
                     {
-                        if(capturing)
+                        if(capturing || streaming_active)
                         {
                             sendResponse("ERR_BUSY\n", fromWiFi);
                             break;
@@ -476,6 +486,45 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                     case 8: //Stop preview
                         previewing = false;
                         sendResponse("PREVIEW_STOPPED\n", fromWiFi);
+                        break;
+
+                    case 9: //Compression test
+                        if(capturing || previewing || streaming_active)
+                        {
+                            sendResponse("ERR_BUSY\n", fromWiFi);
+                            break;
+                        }
+                        run_compression_test(fromWiFi);
+                        break;
+
+                    case 10: //Start stream
+                    {
+                        if(capturing || previewing || streaming_active)
+                        {
+                            sendResponse("ERR_BUSY\n", fromWiFi);
+                            break;
+                        }
+
+                        STREAM_REQUEST* streamReq = (STREAM_REQUEST*)&messageBuffer[3];
+
+                        if(streamReq->channelCount < 1 || streamReq->channelCount > MAX_CHANNELS)
+                        {
+                            sendResponse("ERR_PARAMS\n", fromWiFi);
+                            break;
+                        }
+
+                        if(!StartStream(streamReq, fromWiFi))
+                        {
+                            sendResponse("STREAM_ERROR\n", fromWiFi);
+                            break;
+                        }
+
+                        streaming_active = true;
+                        break;
+                    }
+
+                    case 11: //Stop stream
+                        StopStream();
                         break;
 
                     default:
@@ -921,6 +970,12 @@ int main()
                     sleep_ms(1000);
                 }
             }
+        }
+        else if(streaming_active)
+        {
+            RunStreamSendLoop(false);
+            CleanupStream();
+            streaming_active = false;
         }
         else if(previewing)
         {

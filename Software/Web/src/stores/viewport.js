@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { useCaptureStore } from './capture.js'
-import { usePreviewStore } from './preview.js'
+import { useStreamStore } from './stream.js'
 
 const MIN_VISIBLE_SAMPLES = 10
 const ZOOM_FACTOR = 0.5
@@ -12,8 +12,8 @@ export const useViewportStore = defineStore('viewport', () => {
   const visibleSamples = ref(100)
 
   function getEffectiveTotalSamples() {
-    const preview = usePreviewStore()
-    if (preview.previewing) return preview.totalSamples
+    const stream = useStreamStore()
+    if (stream.streaming) return stream.totalSamples
     return useCaptureStore().totalSamples
   }
 

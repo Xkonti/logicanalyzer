@@ -5,7 +5,7 @@
       color="positive"
       icon="play_arrow"
       label="Capture"
-      :disable="!cap.isConnected || cap.isCapturing || preview.isPreviewing"
+      :disable="!cap.isConnected || cap.isCapturing || stream.isStreaming"
       no-caps
       dense
       @click="showCaptureDialog = true"
@@ -35,24 +35,36 @@
     <q-separator vertical inset class="q-mx-xs" dark />
 
     <q-btn
-      v-if="!preview.isPreviewing"
+      v-if="!stream.isStreaming"
       color="purple"
       icon="monitor_heart"
       label="Realtime"
-      :disable="!cap.isConnected || cap.isCapturing || preview.isPreviewing"
+      :disable="!stream.canStartStream"
       no-caps
       dense
-      @click="showPreviewDialog = true"
+      @click="showStreamDialog = true"
     />
 
     <q-btn
-      v-if="preview.isPreviewing"
+      v-if="stream.isStreaming"
       color="negative"
       icon="stop"
-      label="Stop Preview"
+      label="Stop Realtime"
       no-caps
       dense
-      @click="preview.stopPreview()"
+      @click="stream.stopStream()"
+    />
+
+    <q-separator vertical inset class="q-mx-xs" dark />
+
+    <q-btn
+      color="secondary"
+      icon="science"
+      label="Test"
+      :disable="!cap.isConnected || cap.isCapturing || stream.isStreaming"
+      no-caps
+      dense
+      @click="showCompressTest = true"
     />
 
     <q-chip
@@ -68,35 +80,48 @@
     </q-chip>
 
     <q-chip
-      v-if="preview.previewError"
+      v-if="stream.streamError"
       color="negative"
       text-color="white"
       icon="error"
       dense
       removable
-      @remove="preview.clearError()"
+      @remove="stream.clearError()"
     >
-      {{ preview.previewError }}
+      {{ stream.streamError }}
+    </q-chip>
+
+    <q-chip
+      v-if="stream.streamWarning"
+      color="warning"
+      text-color="white"
+      icon="warning"
+      dense
+      removable
+      @remove="stream.clearWarning()"
+    >
+      {{ stream.streamWarning }}
     </q-chip>
 
     <CaptureDialog v-model="showCaptureDialog" />
 
-    <PreviewDialog
-      v-model="showPreviewDialog"
-      @start="preview.startPreview()"
-    />
+    <CompressTestDialog v-model="showCompressTest" />
+
+    <StreamDialog v-model="showStreamDialog" />
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
 import { useCapture } from 'src/composables/useCapture.js'
-import { usePreview } from 'src/composables/usePreview.js'
+import { useStream } from 'src/composables/useStream.js'
 import CaptureDialog from 'src/components/capture/CaptureDialog.vue'
-import PreviewDialog from 'src/components/preview/PreviewDialog.vue'
+import StreamDialog from 'src/components/capture/StreamDialog.vue'
+import CompressTestDialog from 'src/components/diagnostics/CompressTestDialog.vue'
 
 const cap = useCapture()
-const preview = usePreview()
+const stream = useStream()
 const showCaptureDialog = ref(false)
-const showPreviewDialog = ref(false)
+const showStreamDialog = ref(false)
+const showCompressTest = ref(false)
 </script>

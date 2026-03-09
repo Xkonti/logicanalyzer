@@ -3,7 +3,12 @@
  * Ports AnalyzerDriverBase + LogicAnalyzerDriver from SharedDriver.
  */
 
-import { OutputPacket, buildCaptureRequest, buildPreviewRequest } from '../protocol/packets.js'
+import {
+  OutputPacket,
+  buildCaptureRequest,
+  buildPreviewRequest,
+  buildStreamRequest,
+} from '../protocol/packets.js'
 import {
   parseInitResponse,
   parseCaptureStartResponse,
@@ -17,6 +22,9 @@ import {
   CMD_STOP_CAPTURE,
   CMD_START_PREVIEW,
   CMD_STOP_PREVIEW,
+  CMD_COMPRESSION_TEST,
+  CMD_START_STREAM,
+  CMD_STOP_STREAM,
   CMD_ENTER_BOOTLOADER,
   CMD_BLINK_LED_ON,
   CMD_BLINK_LED_OFF,
@@ -30,6 +38,8 @@ import {
   FAST_TRIGGER_DELAY,
 } from '../protocol/commands.js'
 import { extractSamples, processBurstTimestamps } from './samples.js'
+import { decompressChunk, reverseTranspose } from '../compression/decoder.js'
+import { generatePattern, forwardTranspose, PATTERN_NAMES } from '../compression/test-patterns.js'
 
 export class AnalyzerDriver {
   #transport = null
@@ -42,6 +52,7 @@ export class AnalyzerDriver {
   #channelCount = 0
   #capturing = false
   #previewing = false
+  #streaming = false
 
   get version() {
     return this.#version
@@ -73,6 +84,9 @@ export class AnalyzerDriver {
   get previewing() {
     return this.#previewing
   }
+  get streaming() {
+    return this.#streaming
+  }
   get connected() {
     return this.#transport?.connected ?? false
   }
@@ -101,6 +115,7 @@ export class AnalyzerDriver {
   async disconnect() {
     this.#capturing = false
     this.#previewing = false
+    this.#streaming = false
     if (this.#transport) {
       await this.#transport.disconnect()
     }
@@ -291,6 +306,7 @@ export class AnalyzerDriver {
   async startCapture(session, onComplete) {
     if (this.#capturing) throw new Error('Already capturing')
     if (this.#previewing) throw new Error('Preview is active')
+    if (this.#streaming) throw new Error('Streaming is active')
     if (!this.#transport?.connected) throw new Error('Not connected')
     if (!session.captureChannels || session.captureChannels.length === 0) {
       onComplete?.({ success: false, session, error: 'No capture channels' })
@@ -407,7 +423,7 @@ export class AnalyzerDriver {
    * @returns {Promise<boolean>} true if preview started successfully
    */
   async startPreview(config, onData) {
-    if (this.#capturing || this.#previewing) return false
+    if (this.#capturing || this.#previewing || this.#streaming) return false
     if (!this.#transport?.connected) return false
 
     if (!config.channels || config.channels.length === 0 || config.channels.length > 24) return false
@@ -462,6 +478,240 @@ export class AnalyzerDriver {
       if (this.#previewing) {
         this.#previewing = false
       }
+    }
+  }
+
+  /**
+   * Runs the compression test. Sends CMD_COMPRESSION_TEST, reads 45 test results,
+   * decompresses each, regenerates the test pattern, and verifies round-trip correctness.
+   *
+   * @param {(progress: number) => void} [onProgress] - called with test index (0..44)
+   * @returns {Promise<Object[]>} array of result objects
+   */
+  async runCompressionTest(onProgress) {
+    if (this.#capturing || this.#previewing) throw new Error('Device is busy')
+    if (!this.#transport?.connected) throw new Error('Not connected')
+
+    const pkt = new OutputPacket()
+    pkt.addByte(CMD_COMPRESSION_TEST)
+    await this.#transport.write(pkt.serialize())
+
+    const startLine = await this.#transport.readLine()
+    if (startLine !== 'COMPRESS_TEST') {
+      throw new Error(`Expected COMPRESS_TEST, got "${startLine}"`)
+    }
+
+    const countBytes = await this.#transport.readBytes(2)
+    const testCount = countBytes[0] | (countBytes[1] << 8)
+
+    const results = []
+    for (let i = 0; i < testCount; i++) {
+      onProgress?.(i, testCount)
+
+      const hdr = await this.#transport.readBytes(16)
+      const patternId = hdr[0]
+      const numChannels = hdr[1]
+      const chunkSamples = hdr[2] | (hdr[3] << 8)
+      const payloadSize = hdr[4] | (hdr[5] << 8)
+      const rawInputSize = hdr[6] | (hdr[7] << 8)
+      const avgCompressUs = hdr[8] | (hdr[9] << 8) | (hdr[10] << 16) | ((hdr[11] << 24) >>> 0)
+      const avgCompressedSize = hdr[12] | (hdr[13] << 8)
+      const iterations = hdr[14] | (hdr[15] << 8)
+
+      const compressed = await this.#transport.readBytes(payloadSize)
+
+      // Use avg values for analysis; payload is last iteration for verification
+      const compressedSize = avgCompressedSize || payloadSize
+      const compressUs = avgCompressUs
+
+      // Decompress and verify last iteration's data
+      let pass = false
+      let mismatchInfo = null
+      try {
+        const { channels } = decompressChunk(compressed, numChannels, chunkSamples)
+        const reconstructed = reverseTranspose(channels, numChannels, chunkSamples)
+
+        // For multi-iteration tests, verify with the last chunk's offset
+        const chunkOffset = iterations > 0 ? (iterations - 1) * chunkSamples : 0
+        const expected = generatePattern(patternId, numChannels, chunkSamples, chunkOffset)
+
+        // Also compute expected transposed channels for per-channel comparison
+        const expectedChannels = forwardTranspose(expected, numChannels, chunkSamples)
+
+        if (reconstructed.length !== expected.length) {
+          mismatchInfo = `length: got ${reconstructed.length}, expected ${expected.length}`
+        } else {
+          let firstBad = -1
+          for (let j = 0; j < expected.length; j++) {
+            if (reconstructed[j] !== expected[j]) {
+              firstBad = j
+              break
+            }
+          }
+          if (firstBad >= 0) {
+            // Find which channel(s) are wrong and their header modes
+            const modes = []
+            for (let c = 0; c < numChannels; c++) {
+              modes.push((compressed[c >> 2] >> ((c & 3) * 2)) & 0x03)
+            }
+            const MODE_NAMES = ['RAW', 'ZERO', 'ONE', 'ENC']
+            const badChannels = []
+            for (let c = 0; c < numChannels; c++) {
+              const exp = expectedChannels[c]
+              const got = channels[c]
+              if (exp.length !== got.length || !exp.every((b, k) => b === got[k])) {
+                badChannels.push(`ch${c}(${MODE_NAMES[modes[c]]})`)
+              }
+            }
+
+            const bps = numChannels <= 8 ? 1 : numChannels <= 16 ? 2 : 4
+            const sample = Math.floor(firstBad / bps)
+            mismatchInfo = `byte[${firstBad}] sample=${sample}: got=0x${reconstructed[firstBad].toString(16).padStart(2, '0')} exp=0x${expected[firstBad].toString(16).padStart(2, '0')} | bad channels: ${badChannels.join(', ')}`
+          } else {
+            pass = true
+          }
+        }
+      } catch (e) {
+        mismatchInfo = `decode error: ${e?.message ?? e}`
+      }
+
+      results.push({
+        index: i,
+        patternId,
+        patternName: PATTERN_NAMES[patternId] ?? `PAT_${patternId}`,
+        numChannels,
+        chunkSamples,
+        compressedSize,
+        rawInputSize,
+        ratio: rawInputSize > 0 ? (compressedSize / rawInputSize).toFixed(3) : '?',
+        compressUs,
+        iterations,
+        pass,
+        mismatchInfo,
+      })
+    }
+
+    onProgress?.(testCount, testCount)
+
+    const endLine = await this.#transport.readLine()
+    if (endLine !== 'COMPRESS_TEST_DONE') {
+      throw new Error(`Expected COMPRESS_TEST_DONE, got "${endLine}"`)
+    }
+
+    return results
+  }
+
+  /**
+   * Starts streaming capture. Sends CMD_START_STREAM, reads handshake,
+   * then launches an async read loop calling onChunk for each decompressed chunk.
+   *
+   * @param {Object} config
+   * @param {number[]} config.channels - channel numbers to capture
+   * @param {number} config.frequency - sampling frequency in Hz
+   * @param {(channels: Uint8Array[], chunkSamples: number) => void} onChunk
+   * @returns {Promise<{started: boolean, chunkSamples?: number, numChannels?: number, endStatus?: string}>}
+   */
+  async startStream(config, onChunk) {
+    if (this.#capturing || this.#previewing || this.#streaming) return { started: false }
+    if (!this.#transport?.connected) return { started: false }
+
+    if (!config.channels || config.channels.length === 0 || config.channels.length > 24) {
+      return { started: false }
+    }
+
+    try {
+      const pkt = new OutputPacket()
+      pkt.addByte(CMD_START_STREAM)
+      pkt.addBytes(
+        buildStreamRequest({
+          channels: config.channels,
+          channelCount: config.channels.length,
+          frequency: config.frequency,
+        }),
+      )
+      await this.#transport.write(pkt.serialize())
+
+      const response = await this.#transport.readLine()
+      if (response !== 'STREAM_STARTED') return { started: false }
+
+      // Read 4-byte info header: [chunkSamples LE16][numChannels u8][reserved u8]
+      const info = await this.#transport.readBytes(4)
+      const chunkSamples = info[0] | (info[1] << 8)
+      const numChannels = info[2]
+
+      this.#streaming = true
+
+      // Fire-and-forget the read loop
+      this.#streamEndStatus = null
+      this.#readStreamLoop(numChannels, chunkSamples, onChunk)
+
+      return { started: true, chunkSamples, numChannels }
+    } catch {
+      return { started: false }
+    }
+  }
+
+  #streamEndStatus = null
+
+  /**
+   * Internal async loop that reads compressed stream chunks until EOF.
+   */
+  async #readStreamLoop(numChannels, chunkSamples, onChunk) {
+    try {
+      while (true) {
+        const sizeBytes = await this.#transport.readBytes(2)
+        const compressedSize = sizeBytes[0] | (sizeBytes[1] << 8)
+        if (compressedSize === 0) break // EOF marker
+
+        const compressed = await this.#transport.readBytes(compressedSize)
+        const { channels } = decompressChunk(compressed, numChannels, chunkSamples)
+        onChunk(channels, chunkSamples)
+      }
+
+      this.#streaming = false
+      const endLine = await this.#transport.readLine()
+      this.#streamEndStatus = endLine // "STREAM_DONE" or "STREAM_OVERFLOW"
+    } catch {
+      if (this.#streaming) {
+        this.#streaming = false
+      }
+    }
+  }
+
+  /**
+   * Stops streaming capture. Sends CMD_STOP_STREAM, waits for read loop to finish,
+   * then reconnects transport.
+   *
+   * @returns {Promise<{stopped: boolean, endStatus?: string}>}
+   */
+  async stopStream() {
+    if (!this.#streaming) return { stopped: false }
+
+    try {
+      // Send stop command
+      const pkt = new OutputPacket()
+      pkt.addByte(CMD_STOP_STREAM)
+      await this.#transport.write(pkt.serialize())
+
+      // Wait for read loop to finish (it reads until EOF)
+      const maxWait = 5000
+      const start = Date.now()
+      while (this.#streaming && Date.now() - start < maxWait) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+
+      const endStatus = this.#streamEndStatus
+
+      // Reconnect transport (same pattern as preview stop)
+      await new Promise((r) => setTimeout(r, 200))
+      await this.#transport.disconnect()
+      await new Promise((r) => setTimeout(r, 1))
+      await this.#transport.connect()
+
+      return { stopped: true, endStatus }
+    } catch {
+      this.#streaming = false
+      return { stopped: false }
     }
   }
 

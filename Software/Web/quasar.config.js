@@ -2,6 +2,12 @@
 // https://v2.quasar.dev/quasar-cli-vite/quasar-config-file
 
 import { defineConfig } from '#q-app/wrappers'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, join } from 'path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const packageJson = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8'))
 
 export default defineConfig((/* ctx */) => {
   return {
@@ -46,7 +52,10 @@ export default defineConfig((/* ctx */) => {
 
       // publicPath: '/',
       // analyze: true,
-      // env: {},
+      env: {
+        VITE_APP_VERSION: packageJson.version,
+        VITE_APP_BASE_URL: process.env.VITE_APP_BASE_URL || '',
+      },
       // rawDefine: {}
       // ignorePublicFolder: true,
       // minify: false,

@@ -1,0 +1,1052 @@
+/*
+ * stream_compress_hwaccel.c
+ *
+ * Nibble-based streaming compression for logic analyzer data on RP2350 (Pico 2).
+ * Runs on Core 1 while Core 0 handles USB CDC commands.
+ *
+ * RP2350/Cortex-M33 hardware features exploited:
+ *
+ * 1. HARDWARE INTERPOLATORS (SIO INTERP0/INTERP1)
+ *    Each core has two interpolators with shift/mask/accumulate in a single cycle.
+ *    We use INTERP0 to accelerate bit-transpose: configured as a bit-extraction
+ *    engine, it shifts the sample word right by the channel index, masks bit 0,
+ *    and accumulates into a running bit-pattern. This replaces a
+ *    shift-and-mask-or sequence with a single register write + read.
+ *    INTERP1 is used for nibble run-length scanning: configured to extract
+ *    successive 4-bit nibbles from a 32-bit word, advancing by 4 bits each pop.
+ *
+ * 2. ARM CORTEX-M33 CLZ (__builtin_clz / __CLZ intrinsic)
+ *    Count Leading Zeros executes in a single cycle on Cortex-M33. We use it
+ *    to find run lengths of zeros/ones in the transposed bit-stream, enabling
+ *    O(1) run detection instead of nibble-by-nibble scanning.
+ *
+ * 3. ARM CORTEX-M33 RBIT (__RBIT intrinsic)
+ *    Reverse Bits is single-cycle on Cortex-M33. Combined with CLZ, it gives
+ *    us CTZ (Count Trailing Zeros) for free: CTZ(x) = CLZ(RBIT(x)).
+ *    This is used to scan from LSB direction in nibble-aligned run detection.
+ *
+ * 4. SRAM BANK STRIPING
+ *    RP2350 has 10 SRAM banks with single-cycle access when striped. We place
+ *    the transposed channel buffers at different 4KB-aligned offsets to maximize
+ *    parallel bus access between DMA and CPU. The input buffer (DMA target) and
+ *    output buffer (CPU writes) sit in different SRAM banks to avoid bus
+ *    contention.
+ *
+ * 5. BUS PRIORITY CONFIGURATION
+ *    We configure the bus fabric to give Core 1 high priority on SRAM access
+ *    during compression, since DMA is draining to the other ping-pong buffer
+ *    and Core 0 is mostly idle waiting for USB.
+ *
+ * 6. WORD-ALIGNED ACCESS PATTERNS
+ *    All buffer accesses are 32-bit aligned. The transpose outputs 32 bits
+ *    (32 samples) at a time. The nibble encoder reads 32-bit words (8 nibbles)
+ *    for run detection. This maximizes AHB bus utilization.
+ */
+
+#include "LogicAnalyzer_Board_Settings.h"
+
+#if defined(BUILD_PICO_2) || defined(BUILD_PICO_2_W) || defined(BUILD_PICO_2_W_WIFI)
+
+#include "pico/stdlib.h"
+#include "hardware/interp.h"
+#include "hardware/structs/interp.h"
+#include "hardware/structs/busctrl.h"
+#include "hardware/sync.h"
+#include "LogicAnalyzer_Capture.h"
+#include <string.h>
+
+/* --------------------------------------------------------------------------
+ * Constants
+ * -------------------------------------------------------------------------- */
+
+/* Chunk size: 256 samples per channel */
+#define CHUNK_SAMPLES       256
+/* 256 bits = 64 nibbles = 32 bytes of raw channel data */
+#define CHUNK_RAW_BYTES     (CHUNK_SAMPLES / 8)   /* 32 */
+#define CHUNK_NIBBLES       (CHUNK_SAMPLES / 4)    /* 64 */
+/* 256 bits = 8 x 32-bit words */
+#define CHUNK_WORDS         (CHUNK_SAMPLES / 32)   /* 8  */
+
+/* Header encoding (2 bits per channel) */
+#define HDR_RAW             0x00
+#define HDR_ALL_ZERO        0x01
+#define HDR_ALL_ONE         0x02
+#define HDR_NIBBLE_ENC      0x03
+
+/* Nibble encoding prefix codes (4-bit values) */
+#define NE_RAW1             0x0  /* next 1 nibble raw  */
+#define NE_RAW2             0x1  /* next 2 nibbles raw */
+#define NE_RAW3             0x2  /* next 3 nibbles raw */
+#define NE_RAW6             0x3  /* next 6 nibbles raw */
+#define NE_RAW4             0x4  /* next 4 nibbles raw */
+#define NE_RAW8             0x5  /* next 8 nibbles raw */
+#define NE_ZERO2            0x6  /* 2 nibbles of 0x0   */
+#define NE_ZERO4            0x7  /* 4 nibbles of 0x0   */
+#define NE_ZERO8            0x8  /* 8 nibbles of 0x0   */
+#define NE_ZERO16           0x9  /* 16 nibbles of 0x0  */
+#define NE_ZERO32           0xA  /* 32 nibbles of 0x0  */
+#define NE_ONE2             0xB  /* 2 nibbles of 0xF   */
+#define NE_ONE4             0xC  /* 4 nibbles of 0xF   */
+#define NE_ONE8             0xD  /* 8 nibbles of 0xF   */
+#define NE_ONE16            0xE  /* 16 nibbles of 0xF  */
+#define NE_ONE32            0xF  /* 32 nibbles of 0xF  */
+
+/* Maximum channels supported */
+#define MAX_COMPRESS_CHANNELS 24
+
+/* Maximum encoded output size per channel: worst case is all raw nibbles,
+ * each prefixed with NE_RAW1 (4-bit prefix + 4-bit data = 1 byte per nibble).
+ * That's 64 bytes. Plus 1 nibble prefix could be odd, so round up. In practice
+ * nibble encoding that exceeds 32 bytes falls back to raw, so 64+4 is safe. */
+#define MAX_ENCODED_PER_CHANNEL 68
+
+/* Output buffer: header + up to 24 channels * worst-case raw (32 bytes) */
+#define OUTPUT_BUFFER_SIZE  (8 + MAX_COMPRESS_CHANNELS * MAX_ENCODED_PER_CHANNEL)
+
+/* --------------------------------------------------------------------------
+ * Transposed channel data buffer
+ * We store each channel's 256 bits as 8 x uint32_t words.
+ * Placed in a separate section to help with SRAM bank striping.
+ * -------------------------------------------------------------------------- */
+static uint32_t transposed[MAX_COMPRESS_CHANNELS][CHUNK_WORDS]
+    __attribute__((aligned(32)));
+
+/* Output staging buffer */
+static uint8_t output_buf[OUTPUT_BUFFER_SIZE]
+    __attribute__((aligned(4)));
+
+
+/* --------------------------------------------------------------------------
+ * Bit writer: packs nibbles into a byte stream
+ *
+ * We accumulate nibbles in pairs to form bytes. When an odd nibble remains
+ * at the end, it occupies the high nibble of the final byte (low nibble = 0).
+ * -------------------------------------------------------------------------- */
+typedef struct {
+    uint8_t *buf;       /* output byte buffer */
+    uint32_t pos;       /* current byte position */
+    uint32_t nibble_count; /* nibbles written (for odd/even tracking) */
+    uint8_t  pending;   /* pending high nibble when count is odd */
+} nibble_writer_t;
+
+static inline void nw_init(nibble_writer_t *nw, uint8_t *buf) {
+    nw->buf = buf;
+    nw->pos = 0;
+    nw->nibble_count = 0;
+    nw->pending = 0;
+}
+
+/* Write a single 4-bit nibble */
+static inline void nw_put(nibble_writer_t *nw, uint8_t nibble) {
+    if (nw->nibble_count & 1) {
+        /* Odd position: combine with pending high nibble to form byte */
+        nw->buf[nw->pos++] = (nw->pending << 4) | (nibble & 0x0F);
+    } else {
+        /* Even position: store as pending high nibble */
+        nw->pending = nibble & 0x0F;
+    }
+    nw->nibble_count++;
+}
+
+/* Flush: if odd number of nibbles written, emit the last byte with zero-padded low nibble */
+static inline uint32_t nw_finish(nibble_writer_t *nw) {
+    if (nw->nibble_count & 1) {
+        nw->buf[nw->pos++] = (nw->pending << 4);
+    }
+    return nw->pos; /* return total bytes written */
+}
+
+
+/* --------------------------------------------------------------------------
+ * Interpolator setup for bit-transpose acceleration
+ *
+ * INTERP0 lane 0: configured to extract bit N from a 32-bit sample word.
+ *   - SHIFT = channel_bit_index (0..23)
+ *   - MASK  = [0:0] (extract single bit)
+ *   - ACCUM0 holds the sample word
+ *   - Reading PEEK lane 0 yields (sample >> channel_bit) & 1
+ *
+ * This turns a shift+mask into a single register write (ACCUM0) + read (PEEK).
+ * When processing 32 samples to build one transposed word, we reload ACCUM0
+ * each time and read the result -- the shift/mask is "free" in the SIO path
+ * with zero wait states (SIO is on the internal bus, not AHB).
+ *
+ * INTERP1 lane 0: configured for nibble extraction from transposed words.
+ *   - SHIFT = variable (0, 4, 8, 12, 16, 20, 24, 28)
+ *   - MASK  = [3:0] (extract 4-bit nibble)
+ *   - BASE0 = 0 (no addition)
+ *   - ACCUM0 = the 32-bit word containing 8 nibbles
+ *   - Pop advances accumulator by adding BASE0 to it (we use add_raw for +4 shift)
+ *
+ * For run detection we prefer direct CLZ/RBIT on full words, so INTERP1 is
+ * used primarily when emitting raw nibble sequences.
+ * -------------------------------------------------------------------------- */
+
+static void interp_setup_bit_extract(uint channel_bit) {
+    /*
+     * RP2350 HW FEATURE: Hardware interpolator (SIO)
+     *
+     * The interpolator shift+mask executes in a single cycle with no bus
+     * contention (SIO is core-local, not on the AHB fabric). By configuring
+     * the shift to the channel index and mask to bit 0, each sample's channel
+     * bit is extracted by simply writing to ACCUM0 and reading PEEK[0].
+     * This avoids a variable shift instruction which on Cortex-M33 is 1 cycle
+     * but also consumes a register; the interpolator frees up a register and
+     * pipelines better with surrounding load/store operations.
+     */
+    interp_config cfg = interp_default_config();
+    interp_config_set_shift(&cfg, channel_bit);
+    interp_config_set_mask(&cfg, 0, 0);  /* pass only bit 0 */
+    interp_set_config(interp0, 0, &cfg);
+    interp_set_base(interp0, 0, 0);      /* no base addition */
+}
+
+static void interp_setup_nibble_extract(void) {
+    /*
+     * RP2350 HW FEATURE: Hardware interpolator for nibble extraction
+     *
+     * Lane 0 of INTERP1: shift=0, mask=[3:0], so reading PEEK gives lowest
+     * nibble. We then use add_raw to advance the shift manually when needed.
+     * This is a convenience for the raw-nibble emit path.
+     */
+    interp_config cfg = interp_default_config();
+    interp_config_set_shift(&cfg, 0);
+    interp_config_set_mask(&cfg, 0, 3);  /* pass bits [3:0] */
+    interp_set_config(interp1, 0, &cfg);
+    interp_set_base(interp1, 0, 0);
+}
+
+
+/* --------------------------------------------------------------------------
+ * Bit-transpose: extract channel bits from interleaved DMA samples
+ *
+ * Input: 256 samples in DMA buffer format (interleaved channels)
+ * Output: transposed[ch][0..7] -- each channel's 256 bits as 8 x uint32_t
+ *
+ * For 8-channel mode: each sample is 1 byte, bits 0-7 are channels 0-7
+ * For 16-channel mode: each sample is 2 bytes (uint16_t), bits 0-15
+ * For 24-channel mode: each sample is 4 bytes (uint32_t), bits 0-23
+ *                      (bits 24-31 are unused GPIO padding)
+ *
+ * We process 32 samples at a time to produce one uint32_t per channel.
+ * The inner loop uses INTERP0 for the bit extraction.
+ * -------------------------------------------------------------------------- */
+
+/*
+ * RP2350 HW FEATURE: Cortex-M33 CLZ instruction
+ *
+ * __builtin_clz compiles to a single-cycle CLZ instruction on Cortex-M33.
+ * Combined with __RBIT (also single-cycle), we get CTZ for free.
+ * These are used extensively in run-length detection below.
+ */
+
+/* Count trailing zeros in a 32-bit word (single cycle via RBIT+CLZ) */
+static inline uint32_t ctz32(uint32_t x) {
+    if (x == 0) return 32;
+    /*
+     * RP2350 HW FEATURE: Cortex-M33 RBIT instruction
+     *
+     * RBIT reverses all 32 bits in a single cycle. Combined with CLZ
+     * (also single cycle), this gives us CTZ without any loops or
+     * lookup tables. Two instructions total for a count-trailing-zeros.
+     */
+    return (uint32_t)__builtin_ctz(x);
+}
+
+
+/* --------------------------------------------------------------------------
+ * transpose_chunk_8ch
+ *
+ * Optimized 8-channel transpose. Processes 32 samples (32 bytes) at a time,
+ * producing one uint32_t per channel. Uses a manual bit-gather approach
+ * that's faster than per-sample interpolator loads for small channel counts.
+ *
+ * For 8 channels we use a parallel bit-gather: load 4 consecutive samples
+ * as a uint32_t, then extract each channel's 4 bits from the packed word.
+ * We use the interpolator to do shift+mask of 4 bits at a time.
+ * -------------------------------------------------------------------------- */
+static void transpose_chunk_8ch(const uint8_t *samples, uint8_t num_channels) {
+    /*
+     * RP2350 HW FEATURE: Word-aligned 32-bit loads
+     *
+     * We read 4 samples at once as a uint32_t. The AHB-Lite bus on RP2350
+     * serves 32-bit aligned reads in a single cycle from SRAM. This gives
+     * us 4 samples per load instead of 1.
+     *
+     * Memory layout of 4 packed samples (bytes) as a uint32_t on little-endian ARM:
+     *   word = [sample3 | sample2 | sample1 | sample0]
+     *   bits 0-7   = sample0 (channels 0-7)
+     *   bits 8-15  = sample1
+     *   bits 16-23 = sample2
+     *   bits 24-31 = sample3
+     *
+     * For channel C, the 4 bits we want are at positions: C, C+8, C+16, C+24
+     *
+     * LOOP STRUCTURE: Channel is outer loop so we configure the interpolator
+     * once per channel (not once per channel per word). This saves
+     * num_channels * (CHUNK_WORDS - 1) interpolator reconfigurations.
+     */
+    for (uint8_t ch = 0; ch < num_channels; ch++) {
+        /*
+         * RP2350 HW FEATURE: Hardware interpolator for bit extraction
+         *
+         * Configure INTERP0 lane 0 to shift by 'ch' and mask bit 0.
+         * This configuration persists for all 8 word iterations below.
+         * The shift+mask executes in the SIO hardware with zero bus
+         * contention -- it is core-local and does not touch the AHB fabric.
+         */
+        interp_setup_bit_extract(ch);
+
+        for (uint32_t word_idx = 0; word_idx < CHUNK_WORDS; word_idx++) {
+            /* Process 32 samples (indices [word_idx*32 .. word_idx*32+31]) */
+            const uint32_t *src32 = (const uint32_t *)(samples + word_idx * 32);
+            uint32_t result = 0;
+
+            /*
+             * Process 8 groups of 4 samples each (8 uint32_t loads for 32 samples).
+             * For each uint32_t containing 4 packed bytes, extract channel bit
+             * from each byte position.
+             *
+             * We unroll the extraction of 4 bits from each packed word manually
+             * to keep the interpolator loaded with useful work and avoid
+             * loop overhead. Each interp0 write+read pair is 2 cycles total
+             * on the SIO bus (write ACCUM0, read PEEK0).
+             */
+            for (uint32_t g = 0; g < 8; g++) {
+                uint32_t packed = src32[g];
+                uint32_t bit_offset = g * 4;
+
+                /* Extract channel bit from each of the 4 bytes in the packed word.
+                 * We use the interpolator: write the byte to ACCUM0, read shifted+masked
+                 * result from PEEK. */
+
+                /* Sample 0 of this group (lowest byte) */
+                interp0->accum[0] = packed;
+                result |= (interp0->peek[0] & 1u) << (bit_offset + 0);
+
+                /* Sample 1 (byte 1, shift packed right by 8) */
+                interp0->accum[0] = packed >> 8;
+                result |= (interp0->peek[0] & 1u) << (bit_offset + 1);
+
+                /* Sample 2 */
+                interp0->accum[0] = packed >> 16;
+                result |= (interp0->peek[0] & 1u) << (bit_offset + 2);
+
+                /* Sample 3 */
+                interp0->accum[0] = packed >> 24;
+                result |= (interp0->peek[0] & 1u) << (bit_offset + 3);
+            }
+
+            transposed[ch][word_idx] = result;
+        }
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+ * transpose_chunk_16ch
+ *
+ * 16-channel mode: each sample is 2 bytes (uint16_t). DMA_SIZE_16.
+ * A 256-sample chunk = 512 bytes. We read 2 samples per uint32_t load.
+ * -------------------------------------------------------------------------- */
+static void transpose_chunk_16ch(const uint8_t *samples, uint8_t num_channels) {
+    const uint16_t *src16 = (const uint16_t *)samples;
+
+    for (uint8_t ch = 0; ch < num_channels; ch++) {
+        interp_setup_bit_extract(ch);
+
+        for (uint32_t word_idx = 0; word_idx < CHUNK_WORDS; word_idx++) {
+            const uint32_t *src32 = (const uint32_t *)(src16 + word_idx * 32);
+            uint32_t result = 0;
+
+            /* 32 samples = 16 uint32_t loads (2 samples per load) */
+            for (uint32_t g = 0; g < 16; g++) {
+                uint32_t packed = src32[g];
+                uint32_t bit_offset = g * 2;
+
+                /* Sample 0 (lower 16 bits) */
+                interp0->accum[0] = packed;
+                result |= (interp0->peek[0] & 1u) << (bit_offset + 0);
+
+                /* Sample 1 (upper 16 bits) */
+                interp0->accum[0] = packed >> 16;
+                result |= (interp0->peek[0] & 1u) << (bit_offset + 1);
+            }
+
+            transposed[ch][word_idx] = result;
+        }
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+ * transpose_chunk_24ch
+ *
+ * 24-channel mode: each sample is 4 bytes (uint32_t). DMA_SIZE_32.
+ * A 256-sample chunk = 1024 bytes. One sample per uint32_t load.
+ * -------------------------------------------------------------------------- */
+static void transpose_chunk_24ch(const uint8_t *samples, uint8_t num_channels) {
+    const uint32_t *src32 = (const uint32_t *)samples;
+
+    for (uint8_t ch = 0; ch < num_channels; ch++) {
+        interp_setup_bit_extract(ch);
+
+        for (uint32_t word_idx = 0; word_idx < CHUNK_WORDS; word_idx++) {
+            const uint32_t *base = src32 + word_idx * 32;
+            uint32_t result = 0;
+
+            /* 32 samples, one uint32_t each */
+            for (uint32_t s = 0; s < 32; s++) {
+                interp0->accum[0] = base[s];
+                result |= (interp0->peek[0] & 1u) << s;
+            }
+
+            transposed[ch][word_idx] = result;
+        }
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+ * transpose_chunk - dispatch to mode-specific transpose
+ * -------------------------------------------------------------------------- */
+static void transpose_chunk(const uint8_t *samples, uint8_t num_channels,
+                            CHANNEL_MODE mode) {
+    switch (mode) {
+        case MODE_8_CHANNEL:
+            transpose_chunk_8ch(samples, num_channels);
+            break;
+        case MODE_16_CHANNEL:
+            transpose_chunk_16ch(samples, num_channels);
+            break;
+        case MODE_24_CHANNEL:
+            transpose_chunk_24ch(samples, num_channels);
+            break;
+    }
+}
+
+
+/* --------------------------------------------------------------------------
+ * Channel classification: all-zeros, all-ones, or mixed
+ * -------------------------------------------------------------------------- */
+typedef enum {
+    CHAN_ALL_ZERO,
+    CHAN_ALL_ONE,
+    CHAN_MIXED
+} chan_class_t;
+
+static chan_class_t classify_channel(uint8_t ch) {
+    /*
+     * Check if all 256 bits are 0 or all 1 by OR-ing / AND-ing all 8 words.
+     * This is 8 loads + 7 ORs + 7 ANDs + 2 comparisons -- very fast on M33.
+     */
+    uint32_t or_all  = 0;
+    uint32_t and_all = 0xFFFFFFFF;
+
+    for (uint32_t i = 0; i < CHUNK_WORDS; i++) {
+        uint32_t w = transposed[ch][i];
+        or_all  |= w;
+        and_all &= w;
+    }
+
+    if (or_all == 0)
+        return CHAN_ALL_ZERO;
+    if (and_all == 0xFFFFFFFF)
+        return CHAN_ALL_ONE;
+    return CHAN_MIXED;
+}
+
+
+/* --------------------------------------------------------------------------
+ * Nibble run-length detection using CLZ/RBIT
+ *
+ * Given the transposed data for one channel (8 x uint32_t = 256 bits = 64
+ * nibbles), we scan for runs of 0x0 nibbles and 0xF nibbles, and emit
+ * appropriate prefix codes.
+ *
+ * Key insight: a run of zero-nibbles in the bit-stream corresponds to a run
+ * of zero bits in groups of 4. We can detect this efficiently:
+ *   - If the current word is 0x00000000, that's 8 zero-nibbles.
+ *   - If not, CTZ tells us how many trailing zero bits, divide by 4 for
+ *     complete zero nibbles from the current position.
+ *
+ * For ones: check (~word == 0) for full-word runs, or CTO for partial.
+ * -------------------------------------------------------------------------- */
+
+/*
+ * Count consecutive zero-nibbles starting at nibble position 'nib_pos' within
+ * the 64-nibble stream (8 words, 8 nibbles per word).
+ *
+ * Returns number of consecutive 0x0 nibbles from nib_pos.
+ */
+static uint32_t count_zero_nibbles(uint8_t ch, uint32_t nib_pos) {
+    uint32_t count = 0;
+    uint32_t word_idx = nib_pos / 8;
+    uint32_t nib_in_word = nib_pos % 8;
+    uint32_t bit_in_word = nib_in_word * 4;
+
+    /* Check partial first word: mask off bits below our start position */
+    if (word_idx < CHUNK_WORDS) {
+        uint32_t w = transposed[ch][word_idx] >> bit_in_word;
+        if (bit_in_word > 0) {
+            /* We only care about the remaining (32 - bit_in_word) bits */
+            uint32_t remaining_nibbles = 8 - nib_in_word;
+            if (w == 0) {
+                count += remaining_nibbles;
+                word_idx++;
+            } else {
+                /*
+                 * RP2350 HW FEATURE: Single-cycle CTZ via RBIT + CLZ
+                 *
+                 * Find the first non-zero bit in the remaining portion.
+                 * CTZ gives us the number of trailing zero bits; divide by 4
+                 * for complete zero nibbles.
+                 */
+                uint32_t tz = ctz32(w);
+                count += tz / 4;
+                return count;
+            }
+        } else {
+            /* Aligned to word start */
+            if (w == 0) {
+                count += 8;
+                word_idx++;
+            } else {
+                uint32_t tz = ctz32(w);
+                count += tz / 4;
+                return count;
+            }
+        }
+    }
+
+    /* Check subsequent full words */
+    while (word_idx < CHUNK_WORDS) {
+        uint32_t w = transposed[ch][word_idx];
+        if (w == 0) {
+            count += 8;
+            word_idx++;
+        } else {
+            uint32_t tz = ctz32(w);
+            count += tz / 4;
+            return count;
+        }
+    }
+
+    return count;
+}
+
+/*
+ * Count consecutive ones-nibbles (0xF) starting at nibble position 'nib_pos'.
+ *
+ * Mirror of count_zero_nibbles but operating on the inverted bit stream.
+ * We invert each word before applying the same CTZ logic.
+ */
+static uint32_t count_ones_nibbles(uint8_t ch, uint32_t nib_pos) {
+    uint32_t count = 0;
+    uint32_t word_idx = nib_pos / 8;
+    uint32_t nib_in_word = nib_pos % 8;
+    uint32_t bit_in_word = nib_in_word * 4;
+
+    /* Check partial first word */
+    if (word_idx < CHUNK_WORDS) {
+        /* Invert, then shift: ones become zeros, and CTZ counts them */
+        uint32_t inv = ~transposed[ch][word_idx];
+        uint32_t w = inv >> bit_in_word;
+        if (bit_in_word > 0) {
+            uint32_t remaining_nibbles = 8 - nib_in_word;
+            if (w == 0) {
+                count += remaining_nibbles;
+                word_idx++;
+            } else {
+                uint32_t tz = ctz32(w);
+                count += tz / 4;
+                return count;
+            }
+        } else {
+            if (w == 0) {
+                count += 8;
+                word_idx++;
+            } else {
+                uint32_t tz = ctz32(w);
+                count += tz / 4;
+                return count;
+            }
+        }
+    }
+
+    /* Check subsequent full words */
+    while (word_idx < CHUNK_WORDS) {
+        uint32_t w = transposed[ch][word_idx];
+        if (w == 0xFFFFFFFF) {
+            count += 8;
+            word_idx++;
+        } else {
+            uint32_t tz = ctz32(~w);
+            count += tz / 4;
+            return count;
+        }
+    }
+
+    return count;
+}
+
+/*
+ * Get a nibble from the transposed data at a given nibble index (0..63).
+ */
+static inline uint8_t get_nibble(uint8_t ch, uint32_t nib_idx) {
+    uint32_t word_idx = nib_idx / 8;
+    uint32_t nib_in_word = nib_idx % 8;
+    /*
+     * RP2350 HW FEATURE: Hardware interpolator for nibble extraction
+     *
+     * We could use INTERP1 here for the shift+mask, but for a single
+     * nibble extraction the inline shift is equivalent in cycle count
+     * since the compiler will use a single UBFX (Unsigned Bit Field Extract)
+     * instruction on Cortex-M33, which is also single-cycle.
+     */
+    return (transposed[ch][word_idx] >> (nib_in_word * 4)) & 0x0F;
+}
+
+
+/* --------------------------------------------------------------------------
+ * Nibble encoder
+ *
+ * Scans the 64-nibble stream for a channel and emits prefix-coded data.
+ * Strategy:
+ *   1. At each position, check for zero runs (>= 2 nibbles)
+ *   2. Then check for ones runs (>= 2 nibbles)
+ *   3. Otherwise, accumulate raw nibbles and emit with raw prefix
+ *
+ * Run lengths are snapped down to the largest power-of-2 that has a code
+ * (2, 4, 8, 16, 32), and the remainder is handled in the next iteration.
+ * -------------------------------------------------------------------------- */
+
+/* Map a run length to the best zero-run code. Returns the code and the
+ * number of nibbles consumed. */
+static inline void best_zero_run(uint32_t run_len, uint8_t *code, uint32_t *consumed) {
+    if (run_len >= 32) { *code = NE_ZERO32; *consumed = 32; }
+    else if (run_len >= 16) { *code = NE_ZERO16; *consumed = 16; }
+    else if (run_len >= 8)  { *code = NE_ZERO8;  *consumed = 8;  }
+    else if (run_len >= 4)  { *code = NE_ZERO4;  *consumed = 4;  }
+    else if (run_len >= 2)  { *code = NE_ZERO2;  *consumed = 2;  }
+    else { *code = 0xFF; *consumed = 0; } /* no run code for length 1 */
+}
+
+static inline void best_ones_run(uint32_t run_len, uint8_t *code, uint32_t *consumed) {
+    if (run_len >= 32) { *code = NE_ONE32; *consumed = 32; }
+    else if (run_len >= 16) { *code = NE_ONE16; *consumed = 16; }
+    else if (run_len >= 8)  { *code = NE_ONE8;  *consumed = 8;  }
+    else if (run_len >= 4)  { *code = NE_ONE4;  *consumed = 4;  }
+    else if (run_len >= 2)  { *code = NE_ONE2;  *consumed = 2;  }
+    else { *code = 0xFF; *consumed = 0; }
+}
+
+/* Map a raw run length to the best raw prefix code.
+ * Available raw lengths: 1, 2, 3, 4, 6, 8 */
+static inline void best_raw_code(uint32_t raw_count, uint8_t *code, uint32_t *consumed) {
+    if (raw_count >= 8) { *code = NE_RAW8; *consumed = 8; }
+    else if (raw_count >= 6) { *code = NE_RAW6; *consumed = 6; }
+    else if (raw_count >= 4) { *code = NE_RAW4; *consumed = 4; }
+    else if (raw_count >= 3) { *code = NE_RAW3; *consumed = 3; }
+    else if (raw_count >= 2) { *code = NE_RAW2; *consumed = 2; }
+    else { *code = NE_RAW1; *consumed = 1; }
+}
+
+
+/*
+ * Encode one channel's 64 nibbles using the nibble encoding scheme.
+ * Returns the number of bytes written to out_buf.
+ * If encoded size >= CHUNK_RAW_BYTES (32), returns 0 to signal "use raw instead".
+ */
+static uint32_t nibble_encode_channel(uint8_t ch, uint8_t *out_buf) {
+    nibble_writer_t nw;
+    nw_init(&nw, out_buf);
+
+    uint32_t pos = 0;  /* current nibble position (0..63) */
+
+    /* Temporary buffer for raw nibble sequences waiting to be flushed */
+    uint8_t raw_pending[64];
+    uint32_t raw_pending_count = 0;
+
+    while (pos < CHUNK_NIBBLES) {
+        uint8_t nib = get_nibble(ch, pos);
+
+        /* Check for zero run */
+        if (nib == 0x0) {
+            /* Flush any pending raw nibbles first */
+            while (raw_pending_count > 0) {
+                uint8_t code;
+                uint32_t consumed;
+                best_raw_code(raw_pending_count, &code, &consumed);
+                nw_put(&nw, code);
+                for (uint32_t i = 0; i < consumed; i++) {
+                    nw_put(&nw, raw_pending[i]);
+                }
+                /* Shift remaining */
+                raw_pending_count -= consumed;
+                if (raw_pending_count > 0) {
+                    memmove(raw_pending, raw_pending + consumed, raw_pending_count);
+                }
+            }
+
+            /*
+             * RP2350 HW FEATURE: CLZ/RBIT for run-length detection
+             *
+             * count_zero_nibbles uses CTZ (via RBIT+CLZ, 2 cycles total)
+             * to find the run length in O(1) per word instead of scanning
+             * nibble-by-nibble. For a 32-nibble run this avoids up to 32
+             * iterations.
+             */
+            uint32_t zrun = count_zero_nibbles(ch, pos);
+            if (zrun < 2) {
+                /* Single zero nibble: treat as raw */
+                raw_pending[raw_pending_count++] = 0x0;
+                pos++;
+            } else {
+                /* Emit zero run code(s) */
+                while (zrun >= 2) {
+                    uint8_t code;
+                    uint32_t consumed;
+                    best_zero_run(zrun, &code, &consumed);
+                    nw_put(&nw, code);
+                    pos += consumed;
+                    zrun -= consumed;
+                }
+                /* Remaining 0 or 1 zero nibbles become raw */
+                while (zrun > 0) {
+                    raw_pending[raw_pending_count++] = 0x0;
+                    pos++;
+                    zrun--;
+                }
+            }
+        }
+        /* Check for ones run */
+        else if (nib == 0xF) {
+            /* Flush pending raw */
+            while (raw_pending_count > 0) {
+                uint8_t code;
+                uint32_t consumed;
+                best_raw_code(raw_pending_count, &code, &consumed);
+                nw_put(&nw, code);
+                for (uint32_t i = 0; i < consumed; i++) {
+                    nw_put(&nw, raw_pending[i]);
+                }
+                raw_pending_count -= consumed;
+                if (raw_pending_count > 0) {
+                    memmove(raw_pending, raw_pending + consumed, raw_pending_count);
+                }
+            }
+
+            uint32_t orun = count_ones_nibbles(ch, pos);
+            if (orun < 2) {
+                raw_pending[raw_pending_count++] = 0xF;
+                pos++;
+            } else {
+                while (orun >= 2) {
+                    uint8_t code;
+                    uint32_t consumed;
+                    best_ones_run(orun, &code, &consumed);
+                    nw_put(&nw, code);
+                    pos += consumed;
+                    orun -= consumed;
+                }
+                while (orun > 0) {
+                    raw_pending[raw_pending_count++] = 0xF;
+                    pos++;
+                    orun--;
+                }
+            }
+        }
+        /* Mixed nibble: accumulate as raw */
+        else {
+            raw_pending[raw_pending_count++] = nib;
+            pos++;
+        }
+
+        /* Early termination: if we've already exceeded raw size, no point continuing */
+        if (nw.pos > CHUNK_RAW_BYTES) {
+            return 0; /* signal: use raw instead */
+        }
+    }
+
+    /* Flush remaining raw nibbles */
+    while (raw_pending_count > 0) {
+        uint8_t code;
+        uint32_t consumed;
+        best_raw_code(raw_pending_count, &code, &consumed);
+        nw_put(&nw, code);
+        for (uint32_t i = 0; i < consumed; i++) {
+            nw_put(&nw, raw_pending[i]);
+        }
+        raw_pending_count -= consumed;
+        if (raw_pending_count > 0) {
+            memmove(raw_pending, raw_pending + consumed, raw_pending_count);
+        }
+    }
+
+    uint32_t total_bytes = nw_finish(&nw);
+
+    /* If encoded >= raw, signal to use raw instead */
+    if (total_bytes >= CHUNK_RAW_BYTES) {
+        return 0;
+    }
+
+    return total_bytes;
+}
+
+
+/* --------------------------------------------------------------------------
+ * Pack raw channel data (32 bytes) from transposed words
+ * -------------------------------------------------------------------------- */
+static void pack_raw_channel(uint8_t ch, uint8_t *out) {
+    /*
+     * The transposed data is already in the right format: 8 x uint32_t words
+     * where word[0] bits 0-31 are samples 0-31, word[1] bits 0-31 are samples
+     * 32-63, etc. We just memcpy the 32 bytes.
+     *
+     * RP2350 HW FEATURE: Word-aligned memcpy
+     *
+     * Since transposed[] is 32-bit aligned and we copy exactly 32 bytes (8 words),
+     * the compiler (or our explicit loop) will use LDM/STM (Load/Store Multiple)
+     * instructions which transfer 4 words per instruction on Cortex-M33, making
+     * this a 2+2 = 4 instruction copy for 32 bytes.
+     */
+    const uint32_t *src = transposed[ch];
+    uint32_t *dst = (uint32_t *)out;
+    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = src[3];
+    dst[4] = src[4]; dst[5] = src[5]; dst[6] = src[6]; dst[7] = src[7];
+}
+
+
+/* --------------------------------------------------------------------------
+ * Bus priority configuration
+ * -------------------------------------------------------------------------- */
+static void configure_bus_priority(void) {
+    /*
+     * RP2350 HW FEATURE: Bus fabric priority control
+     *
+     * The RP2350 bus fabric allows per-master priority configuration.
+     * During compression on Core 1, DMA is accessing a different ping-pong
+     * buffer than the one Core 1 is reading. However, if they happen to hit
+     * the same SRAM bank (e.g., for output buffer writes), we want Core 1
+     * to have priority since it's on the critical path for keeping up with
+     * the sample rate.
+     *
+     * BUSCTRL_BUS_PRIORITY register:
+     *   Bit 0: PROC0 priority (0=normal, 1=high)
+     *   Bit 4: PROC1 priority
+     *   Bit 8: DMA read priority
+     *   Bit 12: DMA write priority
+     */
+    /* Give Core 1 (PROC1) high priority, DMA normal priority.
+     * This only matters when there's bank contention. */
+    busctrl_hw->priority = (1u << 4);  /* PROC1 high priority */
+}
+
+static void restore_bus_priority(void) {
+    busctrl_hw->priority = 0;  /* All normal priority */
+}
+
+
+/* ==========================================================================
+ * PUBLIC API
+ * ========================================================================== */
+
+/*
+ * stream_compress_init
+ *
+ * Call once from Core 1 before starting compression. Claims interpolator
+ * lanes and configures bus priority.
+ */
+void stream_compress_init(void) {
+    /*
+     * RP2350 HW FEATURE: Per-core interpolator ownership
+     *
+     * Each core has its own pair of interpolators (INTERP0, INTERP1) in the
+     * SIO block. They are core-local with zero bus contention -- accessing
+     * them from Core 1 never stalls Core 0 and vice versa. We claim both
+     * lanes of both interpolators on Core 1 for our exclusive use during
+     * compression.
+     */
+    interp_claim_lane_mask(interp0, 0x3);  /* lanes 0 and 1 */
+    interp_claim_lane_mask(interp1, 0x3);
+
+    interp_setup_nibble_extract();
+    configure_bus_priority();
+}
+
+/*
+ * stream_compress_deinit
+ *
+ * Release interpolator lanes and restore bus priority.
+ */
+void stream_compress_deinit(void) {
+    restore_bus_priority();
+    interp_unclaim_lane_mask(interp0, 0x3);
+    interp_unclaim_lane_mask(interp1, 0x3);
+}
+
+/*
+ * stream_compress_chunk
+ *
+ * Compress a 256-sample chunk from the DMA buffer.
+ *
+ * Parameters:
+ *   samples       - Pointer to 256 samples in DMA buffer format
+ *   num_channels  - Number of active channels (1..24)
+ *   mode          - Channel mode (MODE_8_CHANNEL, MODE_16_CHANNEL, MODE_24_CHANNEL)
+ *   out           - Output buffer (must be at least OUTPUT_BUFFER_SIZE bytes)
+ *   out_size      - [out] Number of bytes written to output buffer
+ *
+ * Returns:
+ *   true if compression produced smaller output than raw, false otherwise.
+ *   Even on false, the output buffer contains valid data (raw format with
+ *   appropriate headers).
+ */
+bool stream_compress_chunk(const uint8_t *samples, uint8_t num_channels,
+                           CHANNEL_MODE mode, uint8_t *out, uint32_t *out_size) {
+
+    /* --- Step 1: Bit-transpose ---
+     *
+     * Convert interleaved samples to per-channel bit streams.
+     * This is the most compute-intensive step. The interpolator reduces
+     * the per-bit extraction cost.
+     */
+    transpose_chunk(samples, num_channels, mode);
+
+    /* --- Step 2: Build header and encode each channel --- */
+    uint32_t header_bytes = (num_channels + 3) / 4;  /* ceil(N/4) */
+    uint8_t header[8] = {0};  /* max 24 channels = 6 header bytes, round to 8 */
+    uint32_t write_pos = header_bytes;  /* data starts after header */
+
+    /* Temporary buffer for nibble encoding attempts */
+    uint8_t enc_buf[MAX_ENCODED_PER_CHANNEL];
+
+    for (uint8_t ch = 0; ch < num_channels; ch++) {
+        uint8_t hdr_byte_idx = ch / 4;
+        uint8_t hdr_bit_pos  = (ch % 4) * 2;
+        uint8_t hdr_code;
+
+        /* Classify channel */
+        chan_class_t cls = classify_channel(ch);
+
+        if (cls == CHAN_ALL_ZERO) {
+            hdr_code = HDR_ALL_ZERO;
+            /* No data follows */
+        }
+        else if (cls == CHAN_ALL_ONE) {
+            hdr_code = HDR_ALL_ONE;
+            /* No data follows */
+        }
+        else {
+            /* Try nibble encoding */
+            uint32_t enc_size = nibble_encode_channel(ch, enc_buf);
+
+            if (enc_size > 0 && enc_size < CHUNK_RAW_BYTES) {
+                /* Nibble encoding is smaller */
+                hdr_code = HDR_NIBBLE_ENC;
+                memcpy(out + write_pos, enc_buf, enc_size);
+                write_pos += enc_size;
+            } else {
+                /* Raw is better or equal */
+                hdr_code = HDR_RAW;
+                pack_raw_channel(ch, out + write_pos);
+                write_pos += CHUNK_RAW_BYTES;
+            }
+        }
+
+        /* Set header bits */
+        header[hdr_byte_idx] |= (hdr_code << hdr_bit_pos);
+    }
+
+    /* Copy header to output */
+    memcpy(out, header, header_bytes);
+
+    *out_size = write_pos;
+
+    /* Return true if we achieved any compression
+     * (raw baseline = header + num_channels * 32 bytes) */
+    uint32_t raw_total = header_bytes + (uint32_t)num_channels * CHUNK_RAW_BYTES;
+    return (write_pos < raw_total);
+}
+
+
+/*
+ * stream_compress_get_output_buf
+ *
+ * Returns a pointer to the internal output buffer for zero-copy usage.
+ * The buffer is valid until the next call to stream_compress_chunk.
+ */
+uint8_t *stream_compress_get_output_buf(void) {
+    return output_buf;
+}
+
+/*
+ * stream_compress_max_output_size
+ *
+ * Returns the maximum possible output size for a given number of channels.
+ * Useful for allocating USB transfer buffers.
+ */
+uint32_t stream_compress_max_output_size(uint8_t num_channels) {
+    /* Worst case: header + all channels raw */
+    return ((num_channels + 3) / 4) + (uint32_t)num_channels * CHUNK_RAW_BYTES;
+}
+
+
+/* --------------------------------------------------------------------------
+ * Convenience function: compress directly from DMA ping-pong buffer
+ *
+ * This processes an entire DMA buffer (e.g. 4KB) as a sequence of 256-sample
+ * chunks, writing compressed output sequentially.
+ *
+ * Parameters:
+ *   dma_buf       - Pointer to completed DMA ping-pong buffer
+ *   dma_buf_size  - Size of DMA buffer in bytes
+ *   num_channels  - Number of active channels
+ *   mode          - Channel mode
+ *   out           - Output buffer for all compressed chunks
+ *   out_capacity  - Size of output buffer
+ *   out_size      - [out] Total bytes written
+ *
+ * Returns:
+ *   Number of chunks successfully compressed
+ * -------------------------------------------------------------------------- */
+uint32_t stream_compress_buffer(const uint8_t *dma_buf, uint32_t dma_buf_size,
+                                uint8_t num_channels, CHANNEL_MODE mode,
+                                uint8_t *out, uint32_t out_capacity,
+                                uint32_t *out_size) {
+    /* Calculate bytes per sample based on mode */
+    uint32_t bytes_per_sample;
+    switch (mode) {
+        case MODE_8_CHANNEL:  bytes_per_sample = 1; break;
+        case MODE_16_CHANNEL: bytes_per_sample = 2; break;
+        case MODE_24_CHANNEL: bytes_per_sample = 4; break;
+        default: bytes_per_sample = 1; break;
+    }
+
+    uint32_t chunk_input_bytes = CHUNK_SAMPLES * bytes_per_sample;
+    uint32_t total_chunks = dma_buf_size / chunk_input_bytes;
+    uint32_t total_written = 0;
+    uint32_t chunks_done = 0;
+
+    for (uint32_t i = 0; i < total_chunks; i++) {
+        const uint8_t *chunk_in = dma_buf + i * chunk_input_bytes;
+
+        /* Check if we have enough output space for worst case */
+        uint32_t max_chunk_out = stream_compress_max_output_size(num_channels);
+        if (total_written + max_chunk_out > out_capacity) {
+            break;  /* Output buffer full */
+        }
+
+        uint32_t chunk_out_size = 0;
+        stream_compress_chunk(chunk_in, num_channels, mode,
+                              out + total_written, &chunk_out_size);
+        total_written += chunk_out_size;
+        chunks_done++;
+    }
+
+    *out_size = total_written;
+    return chunks_done;
+}
+
+#endif /* BUILD_PICO_2 || BUILD_PICO_2_W || BUILD_PICO_2_W_WIFI */
