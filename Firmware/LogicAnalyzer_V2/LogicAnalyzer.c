@@ -24,21 +24,6 @@
     #include "LogicAnalyzer_W2812.h"
 #endif
 
-#ifdef STREAM_DEBUG
-    /* DBG_MAIN is only called from processData() where stdio_usb is always
-     * active, so printf+fflush is safe and avoids cdc_transfer/stdio conflicts. */
-    #define DBG_MAIN(msg) do { \
-        printf("[SD] %s\n", msg); \
-        fflush(stdout); \
-    } while(0)
-    #define DBG_MAIN_VAL(label,val) do { \
-        printf("[SD] %s=%lu\n", label, (unsigned long)(val)); \
-        fflush(stdout); \
-    } while(0)
-#else
-    #define DBG_MAIN(msg)
-    #define DBG_MAIN_VAL(label,val)
-#endif
 
 #if defined (CYGW_LED) || defined(USE_CYGW_WIFI)
 
@@ -291,9 +276,6 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                     dest++;
                 }
 
-                DBG_MAIN_VAL("cmd", messageBuffer[2]);
-                DBG_MAIN_VAL("flen", dest);
-
                 switch(messageBuffer[2]) //Check the command we received
                 {
 
@@ -453,10 +435,8 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                     case 10: //Start stream
                     {
-                        DBG_MAIN("c10:enter");
                         if(capturing || streaming_active)
                         {
-                            DBG_MAIN("c10:BUSY");
                             sendResponse("ERR_BUSY\n", fromWiFi);
                             break;
                         }
@@ -465,25 +445,16 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                         if(streamReq->channelCount < 1 || streamReq->channelCount > MAX_CHANNELS)
                         {
-                            DBG_MAIN("c10:BAD_PARAMS");
-                            DBG_MAIN_VAL("channelCount", streamReq->channelCount);
                             sendResponse("ERR_PARAMS\n", fromWiFi);
                             break;
                         }
 
-                        DBG_MAIN("c10:startStream");
-                        DBG_MAIN_VAL("freq", streamReq->frequency);
-                        DBG_MAIN_VAL("chCount", streamReq->channelCount);
-                        DBG_MAIN_VAL("chunkSamples", streamReq->chunkSamples);
-
                         if(!StartStream(streamReq, fromWiFi))
                         {
-                            DBG_MAIN("c10:FAIL");
                             sendResponse("STREAM_ERROR\n", fromWiFi);
                             break;
                         }
 
-                        DBG_MAIN("c10:ACTIVE");
                         streaming_active = true;
                         break;
                     }
@@ -887,6 +858,16 @@ int main()
                 RunStreamSendLoop(false);
             #endif
             CleanupStream();
+            /* stdio is restored — send EOF marker + diagnostic via reliable printf path.
+             * The JS read loop expects: 2-byte size (0x0000 = EOF), then a text line. */
+            sleep_ms(50);  /* let stdio_usb_init settle */
+            putchar_raw(0x00);
+            putchar_raw(0x00);
+            stdio_flush();
+            sleep_ms(10);
+            PrintStreamDiagnostic();
+            stdio_flush();
+            sleep_ms(10);
             streaming_active = false;
         }
         else

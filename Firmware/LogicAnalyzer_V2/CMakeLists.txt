@@ -163,7 +163,4 @@ pico_add_extra_outputs(LogicAnalyzer)
 
 target_include_directories(LogicAnalyzer PRIVATE ${CMAKE_CURRENT_LIST_DIR} )
 
-# Stream debug logging via USB CDC — comment out to disable
-add_compile_definitions(STREAM_DEBUG)
-
 target_compile_definitions(LogicAnalyzer PUBLIC USBD_MANUFACTURER="Dr. Gusman" USBD_PRODUCT="LogicAnalyzer" USBD_VID=0x1209 USBD_PID=0x3020)

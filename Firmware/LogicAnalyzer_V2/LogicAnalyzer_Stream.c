@@ -24,39 +24,6 @@ extern bool processUSBInputDirect(bool skipProcessing);
 extern void wifi_transfer(unsigned char* data, int len);
 #endif
 
-#ifdef STREAM_DEBUG
-    /* When stdio_usb is active, cdc_transfer conflicts with it (shared TinyUSB
-     * CDC interface + mutex). Use printf+fflush while stdio is up, switch to
-     * cdc_transfer after stdio_usb_deinit(). */
-    static volatile bool stdio_active = true;
-    static void dbg(const char* msg) {
-        if (stdio_active) {
-            printf("[SD] %s\n", msg);
-            fflush(stdout);
-        } else {
-            char buf[80];
-            int n = snprintf(buf, sizeof(buf), "[SD] %s\n", msg);
-            cdc_transfer((unsigned char*)buf, n);
-            tud_task();
-        }
-    }
-    static void dbg_val(const char* label, uint32_t val) {
-        if (stdio_active) {
-            printf("[SD] %s=%lu\n", label, (unsigned long)val);
-            fflush(stdout);
-        } else {
-            char buf[80];
-            int n = snprintf(buf, sizeof(buf), "[SD] %s=%lu\n", label, (unsigned long)val);
-            cdc_transfer((unsigned char*)buf, n);
-            tud_task();
-        }
-    }
-    #define DBG(msg)           dbg(msg)
-    #define DBG_VAL(label,val) dbg_val(label, (uint32_t)(val))
-#else
-    #define DBG(msg)
-    #define DBG_VAL(label,val)
-#endif
 
 /* ---- Ring buffer ---- */
 static uint8_t  stream_input[STREAM_SLOTS][STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
@@ -227,12 +194,13 @@ static bool setup_stream_pio(uint32_t frequency)
         pio_gpio_init(stream_pio, pinMap[i]);
 
     /* stream_actual_freq is already computed by StartStream before calling us */
-    float clockDiv = (float)clock_get_hz(clk_sys) / (float)frequency;
-    if (clockDiv > 65535.0f) clockDiv = 65535.0f;
+    uint32_t clockDivInt = clock_get_hz(clk_sys) / frequency;
+    if (clockDivInt > 65535) clockDivInt = 65535;
+    if (clockDivInt == 0) clockDivInt = 1;
 
     pio_sm_config smConfig = BLAST_CAPTURE_program_get_default_config(stream_pio_offset);
     sm_config_set_in_pins(&smConfig, INPUT_PIN_BASE);
-    sm_config_set_clkdiv(&smConfig, clockDiv);
+    sm_config_set_clkdiv(&smConfig, (float)clockDivInt);
     sm_config_set_in_shift(&smConfig, true, true, 0);  /* autopush per dword */
     sm_config_set_jmp_pin(&smConfig, pinMap[0]);        /* unused but required */
 
@@ -258,28 +226,17 @@ static bool setup_stream_pio(uint32_t frequency)
 
 bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
 {
-    DBG("SS:enter");
     if (req->channelCount < 1 || req->channelCount > MAX_CHANNELS)
-    {
-        DBG("SS:bad_ch_count");
         return false;
-    }
     if (req->frequency < 1)
-    {
-        DBG("SS:bad_freq");
         return false;
-    }
 
     /* Find highest channel number to determine capture mode */
     uint8_t maxCh = 0;
     for (int i = 0; i < req->channelCount; i++)
     {
         if (req->channels[i] >= MAX_CHANNELS)
-        {
-            DBG("SS:bad_ch_idx");
-            DBG_VAL("ch", req->channels[i]);
             return false;
-        }
         if (req->channels[i] > maxCh)
             maxCh = req->channels[i];
         stream_channel_map[i] = req->channels[i];
@@ -304,16 +261,14 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
 
     stream_num_channels = req->channelCount;
 
-    DBG_VAL("mode", (uint32_t)mode);
-    DBG_VAL("captureCh", stream_capture_channels);
-
-    /* Compute actual PIO frequency (clock divider is clamped to 16-bit max in setup_stream_pio) */
+    /* Compute actual PIO frequency — integer-only to avoid FPU hard fault */
     {
-        float clockDiv = (float)clock_get_hz(clk_sys) / (float)req->frequency;
-        if (clockDiv > 65535.0f) clockDiv = 65535.0f;
-        stream_actual_freq = (uint32_t)((float)clock_get_hz(clk_sys) / clockDiv);
+        uint32_t sys_clk = clock_get_hz(clk_sys);
+        uint32_t clockDiv = sys_clk / req->frequency;
+        if (clockDiv > 65535) clockDiv = 65535;
+        if (clockDiv == 0) clockDiv = 1;
+        stream_actual_freq = sys_clk / clockDiv;
     }
-    DBG_VAL("actualFreq", stream_actual_freq);
 
     /* Use client-provided chunk size, validated to [32, STREAM_MAX_CHUNK] and multiple of 32 */
     {
@@ -324,7 +279,6 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
         if (chunk == 0) chunk = 32;
         stream_chunk_samples = chunk;
     }
-    DBG_VAL("chunkSize", stream_chunk_samples);
 
     /* Reset counters */
     dma_complete_count = 0;
@@ -336,45 +290,18 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     memset(stream_output_size, 0, sizeof(stream_output_size));
 
     /* Setup PIO */
-    DBG("SS:pio_setup");
     if (!setup_stream_pio(req->frequency))
     {
-        DBG("SS:pio_FAIL");
         streaming = false;
         return false;
     }
-    DBG("SS:pio_ok");
 
     /* Setup DMA ring buffer */
     configure_stream_dma(mode);
-    DBG("SS:dma_ok");
 
-    /* Disable stdio_usb background task BEFORE killing Core 1.
-     * This prevents tud_task() reentrancy and avoids stdio mutex deadlock
-     * if Core 1 holds the mutex when killed. */
-    DBG("SS:deinit_stdio");
-    stdio_usb_deinit();
-#ifdef STREAM_DEBUG
-    stdio_active = false;
-#endif
-    DBG("SS:stdio_off");
-
-    multicore_reset_core1();
-    multicore_launch_core1(stream_core1_entry);
-    DBG("SS:core1_up");
-
-    /* Enable PIO — capture begins */
-    pio_sm_set_enabled(stream_pio, stream_sm, true);
-    DBG("SS:pio_on");
-
-    /* Send handshake AFTER all setup succeeds: text response + 8-byte info header. */
-    DBG("SS:handshake");
-    if (fromWiFi)
-        sendResponse("STREAM_STARTED\n", true);
-    else
-        cdc_transfer((unsigned char *)"STREAM_STARTED\n", 15);
-    tud_task();
-    DBG("SS:hs_sent");
+    /* Send handshake text + 8-byte info header BEFORE stdio_usb_deinit.
+     * cdc_transfer does NOT work reliably after stdio_usb_deinit. */
+    sendResponse("STREAM_STARTED\n", fromWiFi);
 
     uint8_t info[8];
     info[0] = stream_chunk_samples & 0xFF;
@@ -391,9 +318,25 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
         wifi_transfer(info, 8);
     else
     #endif
-        cdc_transfer(info, 8);
+    {
+        for (int i = 0; i < 8; i++)
+            putchar_raw(info[i]);
+        stdio_flush();
+        sleep_ms(10);
+    }
 
-    DBG("SS:done");
+    /* Disable stdio_usb background task BEFORE killing Core 1.
+     * This prevents tud_task() reentrancy and avoids stdio mutex deadlock
+     * if Core 1 holds the mutex when killed. */
+    stdio_usb_deinit();
+    sleep_ms(100); /* Let USB stack settle — capture mode uses the same delay */
+
+    multicore_reset_core1();
+    multicore_launch_core1(stream_core1_entry);
+
+    /* Enable PIO — capture begins */
+    pio_sm_set_enabled(stream_pio, stream_sm, true);
+
     return true;
 }
 
@@ -427,10 +370,6 @@ void CleanupStream(void)
 
     /* Re-enable stdio_usb background task (disabled in StartStream) */
     stdio_usb_init();
-#ifdef STREAM_DEBUG
-    stdio_active = true;
-#endif
-    DBG("CS:stdio_restored");
 }
 
 /* Debug exit reason codes */
@@ -439,9 +378,15 @@ void CleanupStream(void)
 #define STREAM_EXIT_DISCONN   2  /* USB disconnect */
 #define STREAM_EXIT_TIMEOUT   3  /* No data produced within timeout */
 
+/* Post-stream diagnostic (populated by RunStreamSendLoop, printed after CleanupStream restores stdio) */
+static uint32_t diag_exit_reason;
+static uint32_t diag_dma_count;
+static uint32_t diag_compress_count;
+static uint32_t diag_send_count;
+static uint32_t diag_loop_count;
+
 void RunStreamSendLoop(bool fromWiFi)
 {
-    DBG("RSL:enter");
     uint32_t loop_count = 0;
     uint32_t exit_reason = STREAM_EXIT_STOP;
     uint64_t last_data_time = time_us_64();
@@ -473,16 +418,6 @@ void RunStreamSendLoop(bool fromWiFi)
             send_head++;
             last_data_time = time_us_64();
 
-            /* Debug: log first chunk and every 100th chunk */
-#ifdef STREAM_DEBUG
-            if (send_head == 1) {
-                DBG_VAL("RSL:first_sz", size);
-            }
-            if (send_head % 100 == 0) {
-                DBG_VAL("RSL:send", send_head);
-                DBG_VAL("RSL:dma", dma_complete_count);
-            }
-#endif
         }
 
         /* Keep USB alive */
@@ -533,62 +468,28 @@ void RunStreamSendLoop(bool fromWiFi)
         }
     }
 
-    DBG_VAL("RSL:exit", exit_reason);
+    /* Save diagnostic counters (will be printed after CleanupStream restores stdio) */
+    diag_exit_reason = exit_reason;
+    diag_dma_count = dma_complete_count;
+    diag_compress_count = compress_head;
+    diag_send_count = send_head;
+    diag_loop_count = loop_count;
 
-    /* Flush any remaining compressed chunks */
-    while (send_head < compress_head)
-    {
-        uint32_t slot = send_head % STREAM_SLOTS;
-        uint16_t size = (uint16_t)stream_output_size[slot];
-        uint8_t size_bytes[2] = { size & 0xFF, (size >> 8) & 0xFF };
+    /* NOTE: EOF marker + diagnostic status are sent AFTER CleanupStream
+     * restores stdio, via the reliable printf path in the main loop.
+     * cdc_transfer is unreliable after stdio_usb_deinit. */
+}
 
-        #ifdef USE_CYGW_WIFI
-        if (fromWiFi)
-        {
-            wifi_transfer(size_bytes, 2);
-            wifi_transfer(stream_output[slot], size);
-        }
-        else
-        #endif
-        {
-            cdc_transfer(size_bytes, 2);
-            cdc_transfer(stream_output[slot], size);
-        }
-        send_head++;
-        tud_task();
-    }
-
-    /* Send EOF marker */
-    uint8_t eof[2] = { 0x00, 0x00 };
-    #ifdef USE_CYGW_WIFI
-    if (fromWiFi)
-        wifi_transfer(eof, 2);
-    else
-    #endif
-        cdc_transfer(eof, 2);
-
-    /* Send termination status with diagnostic counters */
-    char status[128];
-    snprintf(status, sizeof(status),
-        "STREAM_%s DMA=%lu CMP=%lu SEND=%lu LOOP=%lu CONN=%d/%d CHUNKS=%lu FREQ=%lu\n",
-        exit_reason == STREAM_EXIT_TIMEOUT   ? "TIMEOUT" :
-        exit_reason == STREAM_EXIT_OVERFLOW  ? "OVERFLOW" :
-        exit_reason == STREAM_EXIT_DISCONN   ? "DISCONN" : "DONE",
-        (unsigned long)dma_complete_count,
-        (unsigned long)compress_head,
-        (unsigned long)send_head,
-        (unsigned long)loop_count,
-        (int)connected_at_entry,
-        (int)tud_cdc_connected(),
-        (unsigned long)stream_chunk_samples,
-        (unsigned long)stream_actual_freq);
-
-    #ifdef USE_CYGW_WIFI
-    if (fromWiFi)
-        sendResponse(status, true);
-    else
-    #endif
-        cdc_transfer((unsigned char *)status, strlen(status));
+void PrintStreamDiagnostic(void)
+{
+    static const char* reasons[] = { "STOP", "OVERFLOW", "DISCONN", "TIMEOUT" };
+    const char* r = (diag_exit_reason < 4) ? reasons[diag_exit_reason] : "UNKNOWN";
+    printf("[SD] exit=%s DMA=%lu CMP=%lu SEND=%lu LOOP=%lu\n",
+        r,
+        (unsigned long)diag_dma_count,
+        (unsigned long)diag_compress_count,
+        (unsigned long)diag_send_count,
+        (unsigned long)diag_loop_count);
 }
 
 bool IsStreamActive(void)

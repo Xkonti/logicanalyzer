@@ -38,6 +38,9 @@ void RunStreamSendLoop(bool fromWiFi);
  */
 void CleanupStream(void);
 
+/* Print post-stream diagnostic counters via printf (call after CleanupStream restores stdio) */
+void PrintStreamDiagnostic(void);
+
 /* Returns true if currently streaming */
 bool IsStreamActive(void);
 

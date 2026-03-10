@@ -489,11 +489,19 @@ export class AnalyzerDriver {
     try {
       console.log(`[stream] read loop started: ${numChannels}ch, ${chunkSamples} samples/chunk`)
       while (true) {
-        const sizeBytes = await this.#transport.readBytes(2)
+        const sizeBytes = await withTimeout(
+          this.#transport.readBytes(2),
+          5000,
+          'Timeout: no stream chunk size from device within 5s',
+        )
         const compressedSize = sizeBytes[0] | (sizeBytes[1] << 8)
         if (compressedSize === 0) break // EOF marker
 
-        const compressed = await this.#transport.readBytes(compressedSize)
+        const compressed = await withTimeout(
+          this.#transport.readBytes(compressedSize),
+          5000,
+          `Timeout: no stream chunk data (${compressedSize} bytes) within 5s`,
+        )
         const { channels } = decompressChunk(compressed, numChannels, chunkSamples)
         chunksReceived++
         onChunk(channels, chunkSamples)
