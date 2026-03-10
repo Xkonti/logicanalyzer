@@ -93,11 +93,8 @@ uint8_t messageBuffer[160];
 uint16_t bufferPos = 0;
 //Capture status
 bool capturing = false;
-//Preview status
-bool previewing = false;
 //Streaming status
 bool streaming_active = false;
-PREVIEW_REQUEST previewReqData;
 
 bool blink = false;
 uint32_t blinkCount = 0;
@@ -310,9 +307,6 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                             break;
                         }
 
-                        if(previewing)
-                            previewing = false;
-
                         req = (CAPTURE_REQUEST*)&messageBuffer[3]; //Get the request pointer
 
                         bool started = false;
@@ -438,59 +432,9 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                         LED_ON();
                         break;
 
-                    case 7: //Start preview
-                    {
-                        if(capturing || streaming_active)
-                        {
-                            sendResponse("ERR_BUSY\n", fromWiFi);
-                            break;
-                        }
-
-                        PREVIEW_REQUEST* previewReq = (PREVIEW_REQUEST*)&messageBuffer[3];
-
-                        if(previewReq->channelCount < 1 || previewReq->channelCount > MAX_CHANNELS)
-                        {
-                            sendResponse("ERR_PARAMS\n", fromWiFi);
-                            break;
-                        }
-
-                        for(int i = 0; i < previewReq->channelCount; i++)
-                        {
-                            if(previewReq->channels[i] >= MAX_CHANNELS)
-                            {
-                                sendResponse("ERR_PARAMS\n", fromWiFi);
-                                goto end_case7;
-                            }
-                        }
-
-                        if(previewReq->intervalUs < 1000)
-                        {
-                            sendResponse("ERR_PARAMS\n", fromWiFi);
-                            break;
-                        }
-
-                        if(previewReq->samplesPerInterval < 1 || previewReq->samplesPerInterval > 16)
-                        {
-                            sendResponse("ERR_PARAMS\n", fromWiFi);
-                            break;
-                        }
-
-                        memcpy(&previewReqData, previewReq, sizeof(PREVIEW_REQUEST));
-                        previewing = true;
-                        sendResponse("PREVIEW_STARTED\n", fromWiFi);
-
-                        end_case7:
-                        break;
-                    }
-
-                    case 8: //Stop preview
-                        previewing = false;
-                        sendResponse("PREVIEW_STOPPED\n", fromWiFi);
-                        break;
-
                     case 10: //Start stream
                     {
-                        if(capturing || previewing || streaming_active)
+                        if(capturing || streaming_active)
                         {
                             sendResponse("ERR_BUSY\n", fromWiFi);
                             break;
@@ -571,7 +515,7 @@ bool processUSBInput(bool skipProcessing)
 }
 
 /// @brief Receive and process USB data directly via TinyUSB (bypasses stdio).
-/// Used when stdio_usb is disabled during streaming/preview/capture transfer.
+/// Used when stdio_usb is disabled during streaming/capture transfer.
 /// @param skipProcessing If true the received data is not processed (used for cleanup)
 /// @return True if anything is received, false if not
 bool processUSBInputDirect(bool skipProcessing)
@@ -703,120 +647,6 @@ bool processCancel()
     #else
         return processUSBInput(true);
     #endif
-}
-
-/// @brief Runs the real-time preview loop, sending periodic GPIO snapshots to the host
-void runPreview()
-{
-    uint8_t channelCount = previewReqData.channelCount;
-    uint8_t samplesPerInterval = previewReqData.samplesPerInterval;
-    uint32_t intervalUs = previewReqData.intervalUs;
-
-    //Map logical channels to GPIO pins
-    uint8_t gpioPins[MAX_CHANNELS];
-    for(int i = 0; i < channelCount; i++)
-    {
-        uint8_t chIdx = previewReqData.channels[i];
-        gpioPins[i] = pinMap[chIdx];
-    }
-
-    //Configure pins as inputs
-    for(int i = 0; i < channelCount; i++)
-    {
-        gpio_init(gpioPins[i]);
-        gpio_set_dir(gpioPins[i], GPIO_IN);
-    }
-
-    //Calculate packed bytes per sample
-    uint8_t bytesPerSample = (channelCount + 7) / 8;
-    //Packet: 2 marker + 1 spi + 1 chCount + data
-    uint8_t packetSize = 2 + 1 + 1 + samplesPerInterval * bytesPerSample;
-    uint8_t packet[128]; //Max: 2+1+1+16*3 = 52 bytes
-
-    //Disable stdio_usb background task to prevent tud_task() reentrancy
-    //during cdc_transfer() calls. Use processUSBInputDirect() for input.
-    stdio_usb_deinit();
-
-    while(previewing)
-    {
-        //Build packet header
-        packet[0] = 0xAB;
-        packet[1] = 0xCD;
-        packet[2] = samplesPerInterval;
-        packet[3] = channelCount;
-
-        uint8_t dataPos = 4;
-
-        for(int s = 0; s < samplesPerInterval; s++)
-        {
-            uint32_t gpioState = gpio_get_all();
-
-            //Clear the bytes for this sample
-            for(int b = 0; b < bytesPerSample; b++)
-                packet[dataPos + b] = 0;
-
-            //Pack channel bits into bytes (LSB-first)
-            for(int ch = 0; ch < channelCount; ch++)
-            {
-                if(gpioState & (1u << gpioPins[ch]))
-                    packet[dataPos + (ch / 8)] |= (1u << (ch % 8));
-            }
-
-            dataPos += bytesPerSample;
-        }
-
-        #ifdef USE_CYGW_WIFI
-        if(usbDisabled)
-        {
-            wifi_transfer(packet, packetSize);
-        }
-        else
-        #endif
-        {
-            //Detect USB disconnect
-            if(!tud_cdc_connected())
-            {
-                previewing = false;
-                bufferPos = 0;
-                break;
-            }
-
-            cdc_transfer(packet, packetSize);
-            tud_cdc_write_flush();
-            tud_task();
-        }
-
-        //Process input to check for stop commands (use Direct variant — stdio is disabled)
-        #ifdef USE_CYGW_WIFI
-        if(!usbDisabled)
-        {
-            while(processUSBInputDirect(false))
-            {
-                if(!previewing)
-                    break;
-            }
-        }
-        while(processWiFiInput(false))
-        {
-            if(!previewing)
-                break;
-        }
-        #else
-        while(processUSBInputDirect(false))
-        {
-            if(!previewing)
-                break;
-        }
-        #endif
-
-        if(!previewing)
-            break;
-
-        sleep_us(intervalUs);
-    }
-
-    //Re-enable stdio_usb background task
-    stdio_usb_init();
 }
 
 /// @brief Main app loop
@@ -1028,10 +858,6 @@ int main()
             #endif
             CleanupStream();
             streaming_active = false;
-        }
-        else if(previewing)
-        {
-            runPreview();
         }
         else
         {

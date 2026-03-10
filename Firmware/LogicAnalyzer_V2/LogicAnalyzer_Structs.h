@@ -41,19 +41,6 @@
 
     }CAPTURE_REQUEST;
 
-    //Preview request issued by the host computer for real-time pin monitoring
-    typedef struct _PREVIEW_REQUEST
-    {
-        //Channels to monitor
-        uint8_t channels[32];
-        //Microseconds between sample batches
-        uint32_t intervalUs;
-        //Number of channels (1-24)
-        uint8_t channelCount;
-        //GPIO reads per batch (1-16)
-        uint8_t samplesPerInterval;
-    } PREVIEW_REQUEST;
-
     //Stream request issued by the host computer for real-time compressed streaming
     typedef struct _STREAM_REQUEST
     {

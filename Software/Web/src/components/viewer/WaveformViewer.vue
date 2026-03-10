@@ -1,9 +1,7 @@
 <template>
-  <div class="waveform-viewer" :class="{ 'with-led-strip': stream.isStreaming }">
+  <div class="waveform-viewer">
     <div class="wv-corner" />
     <TimelineRuler class="wv-timeline" />
-
-    <PreviewLedStrip v-if="stream.isStreaming" class="wv-led-strip" />
 
     <div class="wv-channels">
       <ChannelLabels class="wv-labels" :channel-height="channelHeight" />
@@ -74,8 +72,6 @@ import { MIN_CHANNEL_HEIGHT } from 'src/core/renderer/waveform-renderer.js'
 import TimelineRuler from './TimelineRuler.vue'
 import ChannelLabels from './ChannelLabels.vue'
 import WaveformCanvas from './WaveformCanvas.vue'
-import PreviewLedStrip from 'src/components/preview/PreviewLedStrip.vue'
-
 const viewport = useViewportStore()
 const cap = useCapture()
 const stream = useStream()
@@ -109,10 +105,6 @@ watch(
   background: rgb(28, 28, 28);
 }
 
-.waveform-viewer.with-led-strip {
-  grid-template-rows: 32px auto 1fr auto;
-}
-
 .wv-corner {
   grid-area: 1 / 1;
   background: rgb(28, 28, 28);
@@ -125,25 +117,13 @@ watch(
   border-bottom: 1px solid rgb(60, 60, 60);
 }
 
-.wv-led-strip {
-  grid-column: 1 / -1;
-  grid-row: 2;
-}
-
 .wv-channels {
   grid-column: 1 / -1;
+  grid-row: 2;
   display: grid;
   grid-template-columns: 160px 1fr;
   overflow-y: auto;
   overflow-x: hidden;
-}
-
-.waveform-viewer:not(.with-led-strip) .wv-channels {
-  grid-row: 2;
-}
-
-.waveform-viewer.with-led-strip .wv-channels {
-  grid-row: 3;
 }
 
 .wv-labels {

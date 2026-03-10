@@ -61,7 +61,6 @@ export function useCapture() {
     () =>
       device.connected &&
       !device.capturing &&
-      !device.previewing &&
       capture.settingsValid &&
       capture.channels.length > 0,
   )

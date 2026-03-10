@@ -34,7 +34,7 @@ src/
 │   ├── driver/                   # High-level device driver (mirrors SharedDriver)
 │   │   ├── types.ts              #   DeviceInfo, CaptureSession, CaptureMode,
 │   │   │                         #   TriggerType, CaptureLimits, BurstInfo, etc.
-│   │   ├── analyzer.ts           #   AnalyzerDriver class (connect, capture, preview)
+│   │   ├── analyzer.ts           #   AnalyzerDriver class (connect, capture, stream)
 │   │   └── samples.ts            #   ExtractSamples (demux UInt32[] -> per-channel byte[])
 │   │
 │   ├── capture/                  # Capture data model & serialization
@@ -77,8 +77,7 @@ src/
 │   ├── useRenderer.ts            #   binds WebGL canvas + annotation canvas to stores
 │   ├── useMarkers.ts             #   region CRUD, user marker, measurements
 │   ├── useDecoders.ts            #   decoder list, configure, run analysis
-│   ├── useFileIO.ts              #   open/save .lac/.csv via browser-fs-access
-│   └── usePreview.ts             #   realtime preview start/stop/data stream
+│   └── useFileIO.ts              #   open/save .lac/.csv via browser-fs-access
 │
 ├── components/                   # Quasar/Vue UI components
 │   ├── connection/
@@ -469,7 +468,7 @@ flowchart TD
 
 - Frame: `[0x55 0xAA] [payload] [0xAA 0x55]`
 - Byte stuffing: bytes `0xAA`, `0x55`, `0xF0` are escaped with `0xF0` prefix and XORed with `0xF0`
-- First payload byte = command ID (0 = init, 1 = capture, 2+ = preview/config)
+- First payload byte = command ID (0 = init, 1 = capture, 2+ = stream/config)
 
 **Capture modes:**
 
@@ -626,10 +625,9 @@ graph LR
     P3["<b>Phase 3</b><br/>Markers<br/><i>Regions, user marker,<br/>timing measurements</i>"]
     P4["<b>Phase 4</b><br/>Decoders<br/><i>I2C/SPI/UART/CAN<br/>decode + annotations</i>"]
     P5["<b>Phase 5</b><br/>WiFi<br/><i>WebSocket connect<br/>(firmware change)</i>"]
-    P6["<b>Phase 6</b><br/>Preview<br/><i>Live signal preview<br/>before triggering</i>"]
-    P7["<b>Phase 7</b><br/>Profiles<br/><i>Save/load profiles,<br/>settings persistence</i>"]
+    P6["<b>Phase 6</b><br/>Profiles<br/><i>Save/load profiles,<br/>settings persistence</i>"]
 
-    P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7
+    P1 --> P2 --> P3 --> P4 --> P5 --> P6
 ```
 
 | Phase                        | Delivers                                                 | Core modules                                 | Components                                          |
@@ -639,8 +637,7 @@ graph LR
 | **3. Markers & measurement** | Regions, user marker, timing measurements                | `capture/editing`                            | `MarkerOverlay`, `MeasurePanel`                     |
 | **4. Protocol decoders**     | I2C/SPI/UART/CAN decode + annotation display             | `decoders/*`, `workers/decoder`              | `DecoderPanel`, `AnnotationOverlay`                 |
 | **5. WiFi connectivity**     | Connect via WebSocket (requires firmware change)         | `transport/websocket`                        | `NetworkConfigDialog`                               |
-| **6. Realtime preview**      | Live signal preview before triggering                    | extend `driver/analyzer`                     | `SamplePreviewer`                                   |
-| **7. Profiles & polish**     | Save/load capture+decoder profiles, settings persistence | `settings` store expansion                   | Profile management UI                               |
+| **6. Profiles & polish**     | Save/load capture+decoder profiles, settings persistence | `settings` store expansion                   | Profile management UI                               |
 
 **Phase 1 is the critical proof-of-concept** — it requires no hardware at all. Anyone can open an existing `.lac` file in Chrome and view waveforms. This validates the rendering engine and the basic UI shell before touching any device communication code.
 

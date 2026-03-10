@@ -83,40 +83,6 @@ export class OutputPacket {
  * @returns {Uint8Array} exactly 56 bytes
  */
 /**
- * Builds the 40-byte PreviewRequest struct in little-endian format.
- * Matches the C firmware PREVIEW_REQUEST with natural alignment:
- *   offset 0:  uint8_t[32] channels (zero-padded)
- *   offset 32: uint32_t intervalUs (LE)
- *   offset 36: uint8_t channelCount
- *   offset 37: uint8_t samplesPerInterval
- *   offset 38-39: trailing padding (struct aligned to 4 bytes)
- *
- * @param {Object} config
- * @param {number[]} config.channels - channel numbers (up to 32)
- * @param {number} config.intervalUs - microseconds between sample batches
- * @param {number} config.channelCount
- * @param {number} config.samplesPerInterval - GPIO reads per batch (1-16)
- * @returns {Uint8Array} exactly 40 bytes
- */
-export function buildPreviewRequest(config) {
-  const buffer = new ArrayBuffer(40)
-  const view = new DataView(buffer)
-  const bytes = new Uint8Array(buffer)
-
-  // channels: 32-byte zero-padded array at offset 0
-  for (let i = 0; i < Math.min(config.channels.length, 32); i++) {
-    bytes[i] = config.channels[i]
-  }
-
-  view.setUint32(32, config.intervalUs, true) // little-endian
-  view.setUint8(36, config.channelCount)
-  view.setUint8(37, config.samplesPerInterval)
-  // offset 38-39: trailing padding (already zero)
-
-  return new Uint8Array(buffer)
-}
-
-/**
  * Builds the 40-byte StreamRequest struct in little-endian format.
  * Matches the C firmware STREAM_REQUEST with natural alignment:
  *   offset 0:  uint8_t[32] channels (zero-padded)
