@@ -509,29 +509,25 @@ export class AnalyzerDriver {
       const pkt = new OutputPacket()
       pkt.addByte(CMD_START_STREAM)
       pkt.addBytes(reqBytes)
-      await this.#transport.write(pkt.serialize())
+      const serialized = pkt.serialize()
+      console.log(`[stream] sending ${serialized.length} bytes to device`)
+      await this.#transport.write(serialized)
+      console.log('[stream] write complete, waiting for handshake...')
 
-      // Read handshake with timeout — firmware should respond within 3 seconds
-      const handshakeTimeout = 3000
-      let response
-      for (let i = 0; i < 20; i++) {
-        response = await Promise.race([
-          this.#transport.readLine(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Stream handshake timeout')), handshakeTimeout),
-          ),
-        ])
-        if (response === 'STREAM_STARTED') break
-      }
+      // Read handshake — firmware always responds with exactly one line
+      const response = await this.#transport.readLine()
+      console.log('[stream] handshake response:', JSON.stringify(response))
       if (response !== 'STREAM_STARTED') {
-        return { started: false, error: `Unexpected response: "${response}"` }
+        return { started: false, error: `Device error: ${response}` }
       }
 
       // Read 8-byte info header: [chunkSamples LE16][numChannels u8][reserved u8][actualFreq LE32]
+      console.log('[stream] reading 8-byte info header...')
       const info = await this.#transport.readBytes(8)
       const chunkSamples = info[0] | (info[1] << 8)
       const numChannels = info[2]
       const actualFrequency = info[4] | (info[5] << 8) | (info[6] << 16) | (info[7] << 24)
+      console.log('[stream] info header:', { chunkSamples, numChannels, actualFrequency })
 
       this.#streaming = true
 

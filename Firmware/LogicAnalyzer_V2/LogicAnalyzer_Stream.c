@@ -1,4 +1,5 @@
 #include "LogicAnalyzer_Stream.h"
+#include "LogicAnalyzer_Board_Settings.h"
 #include "stream_compress.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
@@ -6,15 +7,22 @@
 #include "hardware/irq.h"
 #include "hardware/sync.h"
 #include "hardware/structs/bus_ctrl.h"
+#include "hardware/timer.h"
 #include "pico/multicore.h"
+#include "pico/stdio_usb.h"
 #include "LogicAnalyzer.pio.h"
 #include "tusb.h"
 #include <string.h>
+#include <stdio.h>
 
 /* External functions from LogicAnalyzer.c */
 extern void cdc_transfer(unsigned char* data, int len);
 extern void sendResponse(const char* response, bool toWiFi);
-extern bool processUSBInput(bool skipProcessing);
+extern bool processUSBInputDirect(bool skipProcessing);
+
+#ifdef USE_CYGW_WIFI
+extern void wifi_transfer(unsigned char* data, int len);
+#endif
 
 /* ---- Ring buffer ---- */
 static uint8_t  stream_input[STREAM_SLOTS][STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
@@ -287,19 +295,18 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     /* Setup DMA ring buffer */
     configure_stream_dma(mode);
 
-    /* Reset Core 1 before launch (required on Pico 2W — CYW43 may touch Core 1 during init).
-     * WARNING: Do NOT call printf/stdio_flush between multicore_reset_core1 and
-     * multicore_launch_core1 — on WiFi builds, Core 1 may hold the stdio mutex
-     * when killed, causing a deadlock. */
+    /* Disable stdio_usb background task BEFORE killing Core 1.
+     * This prevents tud_task() reentrancy and avoids stdio mutex deadlock
+     * if Core 1 holds the mutex when killed. */
+    stdio_usb_deinit();
+
     multicore_reset_core1();
     multicore_launch_core1(stream_core1_entry);
 
     /* Enable PIO — capture begins */
     pio_sm_set_enabled(stream_pio, stream_sm, true);
 
-    /* Send handshake AFTER all setup succeeds: text response + 8-byte info header.
-     * Use cdc_transfer directly for USB — printf/stdio_flush would deadlock because
-     * multicore_reset_core1() may have killed Core 1 while it held the stdio mutex. */
+    /* Send handshake AFTER all setup succeeds: text response + 8-byte info header. */
     if (fromWiFi)
         sendResponse("STREAM_STARTED\n", true);
     else
@@ -315,7 +322,13 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     info[5] = (stream_actual_freq >> 8) & 0xFF;
     info[6] = (stream_actual_freq >> 16) & 0xFF;
     info[7] = (stream_actual_freq >> 24) & 0xFF;
-    cdc_transfer(info, 8);
+
+    #ifdef USE_CYGW_WIFI
+    if (fromWiFi)
+        wifi_transfer(info, 8);
+    else
+    #endif
+        cdc_transfer(info, 8);
 
     return true;
 }
@@ -347,12 +360,28 @@ void CleanupStream(void)
     /* Cleanup PIO */
     pio_sm_unclaim(stream_pio, stream_sm);
     pio_remove_program(stream_pio, &BLAST_CAPTURE_program, stream_pio_offset);
+
+    /* Re-enable stdio_usb background task (disabled in StartStream) */
+    stdio_usb_init();
 }
+
+/* Debug exit reason codes */
+#define STREAM_EXIT_STOP      0  /* StopStream() called */
+#define STREAM_EXIT_OVERFLOW  1  /* Ring buffer overflow */
+#define STREAM_EXIT_DISCONN   2  /* USB disconnect */
+#define STREAM_EXIT_TIMEOUT   3  /* No data produced within timeout */
 
 void RunStreamSendLoop(bool fromWiFi)
 {
+    uint32_t loop_count = 0;
+    uint32_t exit_reason = STREAM_EXIT_STOP;
+    uint64_t last_data_time = time_us_64();
+    bool connected_at_entry = tud_cdc_connected();
+
     while (streaming)
     {
+        loop_count++;
+
         /* Send compressed chunks that Core 1 has finished */
         if (send_head < compress_head)
         {
@@ -360,25 +389,66 @@ void RunStreamSendLoop(bool fromWiFi)
             uint16_t size = (uint16_t)stream_output_size[slot];
             uint8_t size_bytes[2] = { size & 0xFF, (size >> 8) & 0xFF };
 
-            cdc_transfer(size_bytes, 2);
-            cdc_transfer(stream_output[slot], size);
+            #ifdef USE_CYGW_WIFI
+            if (fromWiFi)
+            {
+                wifi_transfer(size_bytes, 2);
+                wifi_transfer(stream_output[slot], size);
+            }
+            else
+            #endif
+            {
+                cdc_transfer(size_bytes, 2);
+                cdc_transfer(stream_output[slot], size);
+            }
             send_head++;
+            last_data_time = time_us_64();
         }
 
         /* Keep USB alive */
         tud_task();
 
-        /* Check for incoming stop command */
-        while (processUSBInput(false))
+        /* Check for incoming stop command (use Direct variant — stdio is disabled) */
+        #ifdef USE_CYGW_WIFI
+        if (fromWiFi)
         {
-            if (!streaming)
+            extern bool processWiFiInput(bool skipProcessing);
+            while (processWiFiInput(false))
+            {
+                if (!streaming)
+                    break;
+            }
+        }
+        else
+        #endif
+        {
+            while (processUSBInputDirect(false))
+            {
+                if (!streaming)
+                    break;
+            }
+
+            /* Detect USB disconnect */
+            if (!tud_cdc_connected())
+            {
+                exit_reason = STREAM_EXIT_DISCONN;
+                streaming = false;
                 break;
+            }
         }
 
         /* Overflow detection: DMA is about to overwrite unprocessed slots */
         if (dma_complete_count - send_head >= STREAM_SLOTS - 1)
         {
+            exit_reason = STREAM_EXIT_OVERFLOW;
             overflow = true;
+            streaming = false;
+        }
+
+        /* Diagnostic timeout: if no data produced in 3 seconds, exit with debug info */
+        if (time_us_64() - last_data_time > 3000000)
+        {
+            exit_reason = STREAM_EXIT_TIMEOUT;
             streaming = false;
         }
     }
@@ -390,29 +460,53 @@ void RunStreamSendLoop(bool fromWiFi)
         uint16_t size = (uint16_t)stream_output_size[slot];
         uint8_t size_bytes[2] = { size & 0xFF, (size >> 8) & 0xFF };
 
-        cdc_transfer(size_bytes, 2);
-        cdc_transfer(stream_output[slot], size);
+        #ifdef USE_CYGW_WIFI
+        if (fromWiFi)
+        {
+            wifi_transfer(size_bytes, 2);
+            wifi_transfer(stream_output[slot], size);
+        }
+        else
+        #endif
+        {
+            cdc_transfer(size_bytes, 2);
+            cdc_transfer(stream_output[slot], size);
+        }
         send_head++;
         tud_task();
     }
 
     /* Send EOF marker */
     uint8_t eof[2] = { 0x00, 0x00 };
-    cdc_transfer(eof, 2);
-
-    /* Send termination status — use cdc_transfer for USB to avoid stdio mutex deadlock
-     * (mutex may still be locked from multicore_reset_core1 in StartStream). */
+    #ifdef USE_CYGW_WIFI
     if (fromWiFi)
-    {
-        sendResponse(overflow ? "STREAM_OVERFLOW\n" : "STREAM_DONE\n", true);
-    }
+        wifi_transfer(eof, 2);
     else
-    {
-        if (overflow)
-            cdc_transfer((unsigned char *)"STREAM_OVERFLOW\n", 16);
-        else
-            cdc_transfer((unsigned char *)"STREAM_DONE\n", 12);
-    }
+    #endif
+        cdc_transfer(eof, 2);
+
+    /* Send termination status with diagnostic counters */
+    char status[128];
+    snprintf(status, sizeof(status),
+        "STREAM_%s DMA=%lu CMP=%lu SEND=%lu LOOP=%lu CONN=%d/%d CHUNKS=%lu FREQ=%lu\n",
+        exit_reason == STREAM_EXIT_TIMEOUT   ? "TIMEOUT" :
+        exit_reason == STREAM_EXIT_OVERFLOW  ? "OVERFLOW" :
+        exit_reason == STREAM_EXIT_DISCONN   ? "DISCONN" : "DONE",
+        (unsigned long)dma_complete_count,
+        (unsigned long)compress_head,
+        (unsigned long)send_head,
+        (unsigned long)loop_count,
+        (int)connected_at_entry,
+        (int)tud_cdc_connected(),
+        (unsigned long)stream_chunk_samples,
+        (unsigned long)stream_actual_freq);
+
+    #ifdef USE_CYGW_WIFI
+    if (fromWiFi)
+        sendResponse(status, true);
+    else
+    #endif
+        cdc_transfer((unsigned char *)status, strlen(status));
 }
 
 bool IsStreamActive(void)

@@ -622,6 +622,90 @@ describe('AnalyzerDriver', () => {
     })
   })
 
+  describe('startStream', () => {
+    function makeStreamInfoHeader(chunkSamples, numChannels, actualFrequency) {
+      const buf = new Uint8Array(8)
+      buf[0] = chunkSamples & 0xff
+      buf[1] = (chunkSamples >> 8) & 0xff
+      buf[2] = numChannels
+      buf[3] = 0 // reserved
+      buf[4] = actualFrequency & 0xff
+      buf[5] = (actualFrequency >> 8) & 0xff
+      buf[6] = (actualFrequency >> 16) & 0xff
+      buf[7] = (actualFrequency >> 24) & 0xff
+      return buf
+    }
+
+    it('returns started=true with info on successful handshake', async () => {
+      const { driver } = await makeConnectedDriver({
+        lines: ['STREAM_STARTED'],
+        binaryChunks: [
+          makeStreamInfoHeader(512, 3, 250000),
+          // EOF marker for the read loop
+          new Uint8Array([0x00, 0x00]),
+        ],
+      })
+
+      const onChunk = vi.fn()
+      const onEnd = vi.fn()
+      const result = await driver.startStream(
+        { channels: [0, 1, 2], frequency: 250000, chunkSamples: 512 },
+        onChunk,
+        onEnd,
+      )
+
+      expect(result.started).toBe(true)
+      expect(result.chunkSamples).toBe(512)
+      expect(result.numChannels).toBe(3)
+      expect(result.actualFrequency).toBe(250000)
+    })
+
+    it('returns device error for ERR_BUSY', async () => {
+      const { driver } = await makeConnectedDriver({
+        lines: ['ERR_BUSY'],
+      })
+
+      const result = await driver.startStream(
+        { channels: [0, 1], frequency: 100000 },
+        vi.fn(),
+        vi.fn(),
+      )
+
+      expect(result.started).toBe(false)
+      expect(result.error).toBe('Device error: ERR_BUSY')
+    })
+
+    it('returns device error for ERR_PARAMS', async () => {
+      const { driver } = await makeConnectedDriver({
+        lines: ['ERR_PARAMS'],
+      })
+
+      const result = await driver.startStream(
+        { channels: [0], frequency: 100000 },
+        vi.fn(),
+        vi.fn(),
+      )
+
+      expect(result.started).toBe(false)
+      expect(result.error).toBe('Device error: ERR_PARAMS')
+    })
+
+    it('returns device error for STREAM_ERROR', async () => {
+      const { driver } = await makeConnectedDriver({
+        lines: ['STREAM_ERROR'],
+      })
+
+      const result = await driver.startStream(
+        { channels: [0], frequency: 100000 },
+        vi.fn(),
+        vi.fn(),
+      )
+
+      expect(result.started).toBe(false)
+      expect(result.error).toBe('Device error: STREAM_ERROR')
+    })
+  })
+
   describe('minFrequency', () => {
     it('computes from maxFrequency', async () => {
       const { driver } = await makeConnectedDriver()

@@ -95,8 +95,12 @@ export const useStreamStore = defineStore('stream', () => {
     if (error) {
       streamError.value = error
     }
-    if (endStatus === 'STREAM_OVERFLOW') {
+    if (endStatus?.startsWith('STREAM_OVERFLOW')) {
       streamWarning.value = 'Stream ended due to overflow — data rate exceeded device capacity'
+    } else if (endStatus?.startsWith('STREAM_TIMEOUT')) {
+      streamError.value = `Stream timeout — no data produced. Debug: ${endStatus}`
+    } else if (endStatus?.startsWith('STREAM_DISCONN')) {
+      streamError.value = 'Stream ended — device detected USB disconnect'
     }
     streaming.value = false
     const device = useDeviceStore()
@@ -153,16 +157,28 @@ export const useStreamStore = defineStore('stream', () => {
 
   async function startStream(channelsToStream) {
     const device = useDeviceStore()
+    console.log('[stream] startStream called', {
+      hasDriver: !!device.driver,
+      capturing: device.capturing,
+      streaming: device.streaming,
+      channelCount: channelsToStream?.length,
+    })
     if (!device.driver) {
       streamError.value = 'Not connected'
+      console.warn('[stream] bail: not connected')
       return
     }
     if (device.capturing || device.streaming) {
       streamError.value = 'Device is busy'
+      console.warn('[stream] bail: device busy', {
+        capturing: device.capturing,
+        streaming: device.streaming,
+      })
       return
     }
     if (!channelsToStream || channelsToStream.length === 0) {
       streamError.value = 'No channels selected'
+      console.warn('[stream] bail: no channels')
       return
     }
 
@@ -186,11 +202,19 @@ export const useStreamStore = defineStore('stream', () => {
     pendingChunks = []
     lastFlushTime = 0
 
+    console.log('[stream] calling driver.startStream', {
+      channels: channelNumbers,
+      frequency: freq,
+      chunkSamples: streamChunkSize.value,
+    })
+
     const result = await device.driver.startStream(
       { channels: channelNumbers, frequency: freq, chunkSamples: streamChunkSize.value },
       onChunk,
       onStreamEnd,
     )
+
+    console.log('[stream] driver.startStream returned', result)
 
     if (result.started) {
       // Use actual PIO frequency for timeline (may differ from requested if clamped)
