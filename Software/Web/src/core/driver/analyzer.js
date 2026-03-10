@@ -4,6 +4,13 @@
  */
 
 import { OutputPacket, buildCaptureRequest, buildStreamRequest } from '../protocol/packets.js'
+
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ])
+}
 import {
   parseInitResponse,
   parseCaptureStartResponse,
@@ -428,8 +435,20 @@ export class AnalyzerDriver {
       await this.#transport.write(serialized)
       console.log('[stream] write complete, waiting for handshake...')
 
-      // Read handshake — firmware always responds with exactly one line
-      const response = await this.#transport.readLine()
+      // Read handshake — skip any [SD] debug lines from firmware
+      let response
+      while (true) {
+        response = await withTimeout(
+          this.#transport.readLine(),
+          5000,
+          'Timeout: no handshake from device within 5s',
+        )
+        if (response.startsWith('[SD]')) {
+          console.log('[stream] firmware debug:', response)
+          continue
+        }
+        break
+      }
       console.log('[stream] handshake response:', JSON.stringify(response))
       if (response !== 'STREAM_STARTED') {
         return { started: false, error: `Device error: ${response}` }
@@ -437,7 +456,11 @@ export class AnalyzerDriver {
 
       // Read 8-byte info header: [chunkSamples LE16][numChannels u8][reserved u8][actualFreq LE32]
       console.log('[stream] reading 8-byte info header...')
-      const info = await this.#transport.readBytes(8)
+      const info = await withTimeout(
+        this.#transport.readBytes(8),
+        5000,
+        'Timeout: no info header from device within 5s',
+      )
       const chunkSamples = info[0] | (info[1] << 8)
       const numChannels = info[2]
       const actualFrequency = info[4] | (info[5] << 8) | (info[6] << 16) | (info[7] << 24)

@@ -24,6 +24,40 @@ extern bool processUSBInputDirect(bool skipProcessing);
 extern void wifi_transfer(unsigned char* data, int len);
 #endif
 
+#ifdef STREAM_DEBUG
+    /* When stdio_usb is active, cdc_transfer conflicts with it (shared TinyUSB
+     * CDC interface + mutex). Use printf+fflush while stdio is up, switch to
+     * cdc_transfer after stdio_usb_deinit(). */
+    static volatile bool stdio_active = true;
+    static void dbg(const char* msg) {
+        if (stdio_active) {
+            printf("[SD] %s\n", msg);
+            fflush(stdout);
+        } else {
+            char buf[80];
+            int n = snprintf(buf, sizeof(buf), "[SD] %s\n", msg);
+            cdc_transfer((unsigned char*)buf, n);
+            tud_task();
+        }
+    }
+    static void dbg_val(const char* label, uint32_t val) {
+        if (stdio_active) {
+            printf("[SD] %s=%lu\n", label, (unsigned long)val);
+            fflush(stdout);
+        } else {
+            char buf[80];
+            int n = snprintf(buf, sizeof(buf), "[SD] %s=%lu\n", label, (unsigned long)val);
+            cdc_transfer((unsigned char*)buf, n);
+            tud_task();
+        }
+    }
+    #define DBG(msg)           dbg(msg)
+    #define DBG_VAL(label,val) dbg_val(label, (uint32_t)(val))
+#else
+    #define DBG(msg)
+    #define DBG_VAL(label,val)
+#endif
+
 /* ---- Ring buffer ---- */
 static uint8_t  stream_input[STREAM_SLOTS][STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
 static uint8_t  stream_output[STREAM_SLOTS][STREAM_OUTPUT_SLOT_SIZE] __attribute__((aligned(4)));
@@ -224,17 +258,28 @@ static bool setup_stream_pio(uint32_t frequency)
 
 bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
 {
+    DBG("SS:enter");
     if (req->channelCount < 1 || req->channelCount > MAX_CHANNELS)
+    {
+        DBG("SS:bad_ch_count");
         return false;
+    }
     if (req->frequency < 1)
+    {
+        DBG("SS:bad_freq");
         return false;
+    }
 
     /* Find highest channel number to determine capture mode */
     uint8_t maxCh = 0;
     for (int i = 0; i < req->channelCount; i++)
     {
         if (req->channels[i] >= MAX_CHANNELS)
+        {
+            DBG("SS:bad_ch_idx");
+            DBG_VAL("ch", req->channels[i]);
             return false;
+        }
         if (req->channels[i] > maxCh)
             maxCh = req->channels[i];
         stream_channel_map[i] = req->channels[i];
@@ -259,12 +304,16 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
 
     stream_num_channels = req->channelCount;
 
+    DBG_VAL("mode", (uint32_t)mode);
+    DBG_VAL("captureCh", stream_capture_channels);
+
     /* Compute actual PIO frequency (clock divider is clamped to 16-bit max in setup_stream_pio) */
     {
         float clockDiv = (float)clock_get_hz(clk_sys) / (float)req->frequency;
         if (clockDiv > 65535.0f) clockDiv = 65535.0f;
         stream_actual_freq = (uint32_t)((float)clock_get_hz(clk_sys) / clockDiv);
     }
+    DBG_VAL("actualFreq", stream_actual_freq);
 
     /* Use client-provided chunk size, validated to [32, STREAM_MAX_CHUNK] and multiple of 32 */
     {
@@ -275,6 +324,7 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
         if (chunk == 0) chunk = 32;
         stream_chunk_samples = chunk;
     }
+    DBG_VAL("chunkSize", stream_chunk_samples);
 
     /* Reset counters */
     dma_complete_count = 0;
@@ -286,32 +336,45 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     memset(stream_output_size, 0, sizeof(stream_output_size));
 
     /* Setup PIO */
+    DBG("SS:pio_setup");
     if (!setup_stream_pio(req->frequency))
     {
+        DBG("SS:pio_FAIL");
         streaming = false;
         return false;
     }
+    DBG("SS:pio_ok");
 
     /* Setup DMA ring buffer */
     configure_stream_dma(mode);
+    DBG("SS:dma_ok");
 
     /* Disable stdio_usb background task BEFORE killing Core 1.
      * This prevents tud_task() reentrancy and avoids stdio mutex deadlock
      * if Core 1 holds the mutex when killed. */
+    DBG("SS:deinit_stdio");
     stdio_usb_deinit();
+#ifdef STREAM_DEBUG
+    stdio_active = false;
+#endif
+    DBG("SS:stdio_off");
 
     multicore_reset_core1();
     multicore_launch_core1(stream_core1_entry);
+    DBG("SS:core1_up");
 
     /* Enable PIO — capture begins */
     pio_sm_set_enabled(stream_pio, stream_sm, true);
+    DBG("SS:pio_on");
 
     /* Send handshake AFTER all setup succeeds: text response + 8-byte info header. */
+    DBG("SS:handshake");
     if (fromWiFi)
         sendResponse("STREAM_STARTED\n", true);
     else
         cdc_transfer((unsigned char *)"STREAM_STARTED\n", 15);
     tud_task();
+    DBG("SS:hs_sent");
 
     uint8_t info[8];
     info[0] = stream_chunk_samples & 0xFF;
@@ -330,6 +393,7 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     #endif
         cdc_transfer(info, 8);
 
+    DBG("SS:done");
     return true;
 }
 
@@ -363,6 +427,10 @@ void CleanupStream(void)
 
     /* Re-enable stdio_usb background task (disabled in StartStream) */
     stdio_usb_init();
+#ifdef STREAM_DEBUG
+    stdio_active = true;
+#endif
+    DBG("CS:stdio_restored");
 }
 
 /* Debug exit reason codes */
@@ -373,6 +441,7 @@ void CleanupStream(void)
 
 void RunStreamSendLoop(bool fromWiFi)
 {
+    DBG("RSL:enter");
     uint32_t loop_count = 0;
     uint32_t exit_reason = STREAM_EXIT_STOP;
     uint64_t last_data_time = time_us_64();
@@ -403,6 +472,17 @@ void RunStreamSendLoop(bool fromWiFi)
             }
             send_head++;
             last_data_time = time_us_64();
+
+            /* Debug: log first chunk and every 100th chunk */
+#ifdef STREAM_DEBUG
+            if (send_head == 1) {
+                DBG_VAL("RSL:first_sz", size);
+            }
+            if (send_head % 100 == 0) {
+                DBG_VAL("RSL:send", send_head);
+                DBG_VAL("RSL:dma", dma_complete_count);
+            }
+#endif
         }
 
         /* Keep USB alive */
@@ -452,6 +532,8 @@ void RunStreamSendLoop(bool fromWiFi)
             streaming = false;
         }
     }
+
+    DBG_VAL("RSL:exit", exit_reason);
 
     /* Flush any remaining compressed chunks */
     while (send_head < compress_head)
