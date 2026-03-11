@@ -16,9 +16,7 @@
 #include <stdio.h>
 
 /* External functions from LogicAnalyzer.c */
-extern void cdc_transfer(unsigned char* data, int len);
 extern void sendResponse(const char* response, bool toWiFi);
-extern bool processUSBInputDirect(bool skipProcessing);
 
 #ifdef USE_CYGW_WIFI
 extern void wifi_transfer(unsigned char* data, int len);
@@ -325,14 +323,10 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
         sleep_ms(10);
     }
 
-    /* Disable stdio_usb background task BEFORE killing Core 1.
-     * This prevents tud_task() reentrancy and avoids stdio mutex deadlock
-     * if Core 1 holds the mutex when killed. */
-    stdio_usb_deinit();
-    sleep_ms(100); /* Let USB stack settle — capture mode uses the same delay */
-
-    multicore_reset_core1();
-    multicore_launch_core1(stream_core1_entry);
+    /* Keep stdio_usb active — data is sent via putchar_raw (stdio-safe).
+     * stdio_usb_deinit() breaks cdc_transfer in the streaming context
+     * (works in capture mode but not streaming — root cause unknown).
+     * With stdio active, the background timer handles tud_task(). */
 
     /* Enable PIO — capture begins */
     pio_sm_set_enabled(stream_pio, stream_sm, true);
@@ -347,8 +341,7 @@ void StopStream(void)
 
 void CleanupStream(void)
 {
-    /* Stop Core 1 */
-    multicore_reset_core1();
+    /* Core 1 (WiFi) was never stopped — no reset needed */
 
     /* Stop PIO */
     pio_sm_set_enabled(stream_pio, stream_sm, false);
@@ -368,39 +361,39 @@ void CleanupStream(void)
     pio_sm_unclaim(stream_pio, stream_sm);
     pio_remove_program(stream_pio, &BLAST_CAPTURE_program, stream_pio_offset);
 
-    /* Re-enable stdio_usb background task (disabled in StartStream) */
-    stdio_usb_init();
+    /* stdio_usb was never disabled — no reinit needed */
 }
 
-/* Debug exit reason codes */
-#define STREAM_EXIT_STOP      0  /* StopStream() called */
-#define STREAM_EXIT_OVERFLOW  1  /* Ring buffer overflow */
-#define STREAM_EXIT_DISCONN   2  /* USB disconnect */
-#define STREAM_EXIT_TIMEOUT   3  /* No data produced within timeout */
-
-/* Post-stream diagnostic (populated by RunStreamSendLoop, printed after CleanupStream restores stdio) */
-static uint32_t diag_exit_reason;
-static uint32_t diag_dma_count;
-static uint32_t diag_compress_count;
-static uint32_t diag_send_count;
-static uint32_t diag_loop_count;
+/* Send raw bytes via stdio (putchar_raw). Stdio is kept active during
+ * streaming, so this is safe — the background timer handles tud_task()
+ * and the stdio mutex prevents reentrancy. */
+static void stream_raw_write(const uint8_t* data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; i++)
+        putchar_raw(data[i]);
+    stdio_flush();
+}
 
 void RunStreamSendLoop(bool fromWiFi)
 {
-    uint32_t loop_count = 0;
-    uint32_t exit_reason = STREAM_EXIT_STOP;
-    uint64_t last_data_time = time_us_64();
-    bool connected_at_entry = tud_cdc_connected();
-
     while (streaming)
     {
-        loop_count++;
-
-        /* Send compressed chunks that Core 1 has finished */
-        if (send_head < compress_head)
+        /* Compress and send chunks as DMA completes them (inline on Core 0) */
+        if (send_head < dma_complete_count)
         {
             uint32_t slot = send_head % STREAM_SLOTS;
-            uint16_t size = (uint16_t)stream_output_size[slot];
+
+            /* Compress inline — Core 1 (WiFi) is left running */
+            uint32_t compressed_size = stream_compress_chunk_mapped(
+                stream_input[slot],
+                stream_channel_map,
+                stream_num_channels,
+                stream_capture_channels,
+                stream_chunk_samples,
+                stream_output[slot]
+            );
+
+            uint16_t size = (uint16_t)compressed_size;
             uint8_t size_bytes[2] = { size & 0xFF, (size >> 8) & 0xFF };
 
             #ifdef USE_CYGW_WIFI
@@ -412,18 +405,13 @@ void RunStreamSendLoop(bool fromWiFi)
             else
             #endif
             {
-                cdc_transfer(size_bytes, 2);
-                cdc_transfer(stream_output[slot], size);
+                stream_raw_write(size_bytes, 2);
+                stream_raw_write(stream_output[slot], size);
             }
             send_head++;
-            last_data_time = time_us_64();
-
         }
 
-        /* Keep USB alive */
-        tud_task();
-
-        /* Check for incoming stop command (use Direct variant — stdio is disabled) */
+        /* Check for incoming stop command (stdio is active, use normal input) */
         #ifdef USE_CYGW_WIFI
         if (fromWiFi)
         {
@@ -437,7 +425,8 @@ void RunStreamSendLoop(bool fromWiFi)
         else
         #endif
         {
-            while (processUSBInputDirect(false))
+            extern bool processUSBInput(bool skipProcessing);
+            while (processUSBInput(false))
             {
                 if (!streaming)
                     break;
@@ -446,7 +435,6 @@ void RunStreamSendLoop(bool fromWiFi)
             /* Detect USB disconnect */
             if (!tud_cdc_connected())
             {
-                exit_reason = STREAM_EXIT_DISCONN;
                 streaming = false;
                 break;
             }
@@ -455,41 +443,25 @@ void RunStreamSendLoop(bool fromWiFi)
         /* Overflow detection: DMA is about to overwrite unprocessed slots */
         if (dma_complete_count - send_head >= STREAM_SLOTS - 1)
         {
-            exit_reason = STREAM_EXIT_OVERFLOW;
             overflow = true;
-            streaming = false;
-        }
-
-        /* Diagnostic timeout: if no data produced in 3 seconds, exit with debug info */
-        if (time_us_64() - last_data_time > 3000000)
-        {
-            exit_reason = STREAM_EXIT_TIMEOUT;
             streaming = false;
         }
     }
 
-    /* Save diagnostic counters (will be printed after CleanupStream restores stdio) */
-    diag_exit_reason = exit_reason;
-    diag_dma_count = dma_complete_count;
-    diag_compress_count = compress_head;
-    diag_send_count = send_head;
-    diag_loop_count = loop_count;
+    /* Send EOF marker */
+    uint8_t eof[2] = { 0x00, 0x00 };
+    #ifdef USE_CYGW_WIFI
+    if (fromWiFi)
+        wifi_transfer(eof, 2);
+    else
+    #endif
+        stream_raw_write(eof, 2);
 
-    /* NOTE: EOF marker + diagnostic status are sent AFTER CleanupStream
-     * restores stdio, via the reliable printf path in the main loop.
-     * cdc_transfer is unreliable after stdio_usb_deinit. */
-}
-
-void PrintStreamDiagnostic(void)
-{
-    static const char* reasons[] = { "STOP", "OVERFLOW", "DISCONN", "TIMEOUT" };
-    const char* r = (diag_exit_reason < 4) ? reasons[diag_exit_reason] : "UNKNOWN";
-    printf("[SD] exit=%s DMA=%lu CMP=%lu SEND=%lu LOOP=%lu\n",
-        r,
-        (unsigned long)diag_dma_count,
-        (unsigned long)diag_compress_count,
-        (unsigned long)diag_send_count,
-        (unsigned long)diag_loop_count);
+    /* Send termination status line (JS readLine() expects this after EOF) */
+    if (overflow)
+        sendResponse("STREAM_OVERFLOW\n", fromWiFi);
+    else
+        sendResponse("STREAM_DONE\n", fromWiFi);
 }
 
 bool IsStreamActive(void)

@@ -858,16 +858,6 @@ int main()
                 RunStreamSendLoop(false);
             #endif
             CleanupStream();
-            /* stdio is restored — send EOF marker + diagnostic via reliable printf path.
-             * The JS read loop expects: 2-byte size (0x0000 = EOF), then a text line. */
-            sleep_ms(50);  /* let stdio_usb_init settle */
-            putchar_raw(0x00);
-            putchar_raw(0x00);
-            stdio_flush();
-            sleep_ms(10);
-            PrintStreamDiagnostic();
-            stdio_flush();
-            sleep_ms(10);
             streaming_active = false;
         }
         else

@@ -491,8 +491,8 @@ export class AnalyzerDriver {
       while (true) {
         const sizeBytes = await withTimeout(
           this.#transport.readBytes(2),
-          5000,
-          'Timeout: no stream chunk size from device within 5s',
+          8000,
+          'Timeout: no stream chunk size from device within 8s',
         )
         const compressedSize = sizeBytes[0] | (sizeBytes[1] << 8)
         if (compressedSize === 0) break // EOF marker
