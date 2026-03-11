@@ -17,7 +17,10 @@
 import { getChannelColor, withAlpha, BG_CHANNEL_COLORS, COLORS } from './colors.js'
 
 /** Minimum height per channel in CSS pixels. */
-export const MIN_CHANNEL_HEIGHT = 48
+export const MIN_CHANNEL_HEIGHT = 30
+
+/** Maximum height per channel in CSS pixels. */
+export const MAX_CHANNEL_HEIGHT = 64
 
 /** Fraction of channel height used as top/bottom margin for the waveform trace. */
 const CHANNEL_MARGIN_RATIO = 0.2
@@ -198,7 +201,7 @@ export class WaveformRenderer {
     const channels = this._visibleChannels
     if (channels.length === 0 || this.visibleSamples === 0) return
 
-    const channelHeight = Math.max(MIN_CHANNEL_HEIGHT, height / channels.length)
+    const channelHeight = Math.min(MAX_CHANNEL_HEIGHT, Math.max(MIN_CHANNEL_HEIGHT, height / channels.length))
     this._channelHeight = channelHeight
     const totalHeight = channelHeight * channels.length
 

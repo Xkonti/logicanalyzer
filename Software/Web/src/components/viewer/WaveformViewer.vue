@@ -122,6 +122,7 @@ watch(
   grid-row: 2;
   display: grid;
   grid-template-columns: 160px 1fr;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
 }
