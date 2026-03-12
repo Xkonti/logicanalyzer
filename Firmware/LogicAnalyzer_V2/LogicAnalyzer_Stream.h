@@ -6,7 +6,7 @@
 #include "LogicAnalyzer_Capture.h"
 
 /* Ring buffer configuration */
-#define STREAM_SLOTS            8
+#define STREAM_SLOTS            62
 #define STREAM_MAX_CHUNK        1024
 #define STREAM_INPUT_SLOT_SIZE  (STREAM_MAX_CHUNK * 4)   /* 4096 bytes (24ch worst case) */
 #define STREAM_OUTPUT_SLOT_SIZE 3080                      /* max compressed for 24ch/1024 */

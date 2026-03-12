@@ -20,5 +20,6 @@ extern EVENT_MACHINE frontendToWifi;
 extern EVENT_MACHINE usbToFrontend;
 extern EVENT_MACHINE frontendToUsb;
 extern USB_BULK_TRANSFER usb_bulk;
+extern uint8_t captureBuffer[];
 
 #endif

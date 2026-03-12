@@ -1,5 +1,6 @@
 #include "LogicAnalyzer_Board_Settings.h"
 #include "LogicAnalyzer_Capture.h"
+#include "Shared_Buffers.h"
 #include "hardware/gpio.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
@@ -63,8 +64,7 @@ static exception_handler_t oldSysTickHandler;
 
 const uint8_t pinMap[] = PIN_MAP;
 
-//Main capture buffer, aligned at a dword boundary.
-static uint8_t captureBuffer[CAPTURE_BUFFER_SIZE] __attribute__((aligned(4)));
+//Main capture buffer — defined in Shared_Buffers.c (shared with streaming ring buffers)
 
 #define CAPTURE_TYPE_SIMPLE 0
 #define CAPTURE_TYPE_COMPLEX 1
@@ -608,7 +608,7 @@ bool StartCaptureFast(uint32_t freq, uint32_t preLength, uint32_t postLength, co
         return false;
 
     //Clear capture buffer (to avoid sending bad data if the trigger happens before the presamples are filled)
-    memset(captureBuffer, 0, sizeof(captureBuffer));
+    memset(captureBuffer, 0, CAPTURE_BUFFER_SIZE);
 
     //Store info about the capture
     lastPreSize = preLength;
@@ -777,7 +777,7 @@ bool StartCaptureComplex(uint32_t freq, uint32_t preLength, uint32_t postLength,
         return false;
 
     //Clear capture buffer (to avoid sending bad data if the trigger happens before the presamples are filled)
-    memset(captureBuffer, 0, sizeof(captureBuffer));
+    memset(captureBuffer, 0, CAPTURE_BUFFER_SIZE);
 
     //Store info about the capture
     lastPreSize = preLength;
@@ -942,7 +942,7 @@ bool StartCaptureBlast(uint32_t freq, uint32_t length, const uint8_t* capturePin
         return false;
 
     //Clear capture buffer (to avoid sending bad data if the trigger happens before the presamples are filled)
-    memset(captureBuffer, 0, sizeof(captureBuffer));
+    memset(captureBuffer, 0, CAPTURE_BUFFER_SIZE);
 
     //Store info about the capture
     lastPreSize = 0;
@@ -1065,7 +1065,7 @@ bool StartCaptureSimple(uint32_t freq, uint32_t preLength, uint32_t postLength, 
         return false;
 
     //Clear capture buffer (to avoid sending bad data if the trigger happens before the presamples are filled)
-    memset(captureBuffer, 0, sizeof(captureBuffer));
+    memset(captureBuffer, 0, CAPTURE_BUFFER_SIZE);
 
     //Store info about the capture
     lastPreSize = preLength;

@@ -1,5 +1,6 @@
 #include "LogicAnalyzer_Stream.h"
 #include "LogicAnalyzer_Board_Settings.h"
+#include "Shared_Buffers.h"
 #include "stream_compress.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
@@ -25,15 +26,26 @@ extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
 extern void usb_cdc_write_bulk_ext(const uint8_t* data, uint32_t len);
 
 
-/* ---- Ring buffers ---- */
-static uint8_t  stream_input[STREAM_SLOTS][STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
-static uint8_t  stream_output[STREAM_SLOTS][STREAM_OUTPUT_SLOT_SIZE] __attribute__((aligned(4)));
+/* ---- Ring buffer layout within shared captureBuffer ---- */
+/*
+ * Memory layout (all regions contiguous, computed from captureBuffer base):
+ *   [0]                          Input ring:  STREAM_SLOTS * STREAM_INPUT_SLOT_SIZE
+ *   [STREAM_INPUT_TOTAL]         Output ring: STREAM_SLOTS * STREAM_OUTPUT_SLOT_SIZE
+ *   [STREAM_INPUT_TOTAL + STREAM_OUTPUT_TOTAL]  Local input copy:  STREAM_INPUT_SLOT_SIZE
+ *   [... + STREAM_INPUT_SLOT_SIZE]              Local transmit copy: STREAM_OUTPUT_SLOT_SIZE
+ */
+#define STREAM_INPUT_TOTAL   (STREAM_SLOTS * STREAM_INPUT_SLOT_SIZE)
+#define STREAM_OUTPUT_TOTAL  (STREAM_SLOTS * STREAM_OUTPUT_SLOT_SIZE)
+
+#define STREAM_INPUT_PTR(slot)    (captureBuffer + (slot) * STREAM_INPUT_SLOT_SIZE)
+#define STREAM_OUTPUT_PTR(slot)   (captureBuffer + STREAM_INPUT_TOTAL + (slot) * STREAM_OUTPUT_SLOT_SIZE)
+#define STREAM_LOCAL_INPUT_PTR    (captureBuffer + STREAM_INPUT_TOTAL + STREAM_OUTPUT_TOTAL)
+#define STREAM_LOCAL_TRANSMIT_PTR (captureBuffer + STREAM_INPUT_TOTAL + STREAM_OUTPUT_TOTAL + STREAM_INPUT_SLOT_SIZE)
+
+#define STREAM_TOTAL_SIZE (STREAM_INPUT_TOTAL + STREAM_OUTPUT_TOTAL + STREAM_INPUT_SLOT_SIZE + STREAM_OUTPUT_SLOT_SIZE)
+_Static_assert(STREAM_TOTAL_SIZE <= CAPTURE_BUFFER_SIZE, "Streaming buffers exceed captureBuffer size");
+
 static uint32_t stream_output_size[STREAM_SLOTS];
-
-/* ---- Local copy buffers (prevent reading partially-overwritten data) ---- */
-static uint8_t  compress_local_input[STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
-
-static uint8_t  transmit_local_buf[STREAM_OUTPUT_SLOT_SIZE]   __attribute__((aligned(4)));
 
 /* ---- Producer-consumer counters (monotonically increasing) ---- */
 static volatile uint32_t dma_complete_count;        /* written by DMA ISR (Core 0) */
@@ -86,7 +98,7 @@ void __not_in_flash_func(stream_dma_handler)(void)
         dma_channel_acknowledge_irq1(stream_dma0);
         dma_complete_count++;
         uint32_t next = (dma_complete_count + 1) % STREAM_SLOTS;
-        dma_channel_set_write_addr(stream_dma0, stream_input[next], false);
+        dma_channel_set_write_addr(stream_dma0, STREAM_INPUT_PTR(next), false);
     }
 
     if (dma_channel_get_irq1_status(stream_dma1))
@@ -94,7 +106,7 @@ void __not_in_flash_func(stream_dma_handler)(void)
         dma_channel_acknowledge_irq1(stream_dma1);
         dma_complete_count++;
         uint32_t next = (dma_complete_count + 1) % STREAM_SLOTS;
-        dma_channel_set_write_addr(stream_dma1, stream_input[next], false);
+        dma_channel_set_write_addr(stream_dma1, STREAM_INPUT_PTR(next), false);
     }
 }
 
@@ -142,11 +154,11 @@ static void configure_stream_dma(CHANNEL_MODE mode)
     /* DMA1 configured but not triggered; DMA0 configured and triggered.
      * DMA0 writes to slot[0], DMA1 writes to slot[1]. */
     dma_channel_configure(stream_dma1, &c1,
-        stream_input[1], &stream_pio->rxf[stream_sm],
+        STREAM_INPUT_PTR(1), &stream_pio->rxf[stream_sm],
         stream_chunk_samples, false);
 
     dma_channel_configure(stream_dma0, &c0,
-        stream_input[0], &stream_pio->rxf[stream_sm],
+        STREAM_INPUT_PTR(0), &stream_pio->rxf[stream_sm],
         stream_chunk_samples, true);
 }
 
@@ -354,18 +366,18 @@ void RunCompressionLoop(void)
 
         /* Copy input slot to local buffer (prevent partial overwrite during compression) */
         uint32_t input_slot = compress_read_count % STREAM_SLOTS;
-        memcpy(compress_local_input, stream_input[input_slot], STREAM_INPUT_SLOT_SIZE);
+        memcpy(STREAM_LOCAL_INPUT_PTR, STREAM_INPUT_PTR(input_slot), STREAM_INPUT_SLOT_SIZE);
 
         /* Compress into the output ring */
         uint32_t output_slot = compress_complete_count % STREAM_SLOTS;
 
         stream_output_size[output_slot] = stream_compress_chunk_mapped(
-            compress_local_input,
+            STREAM_LOCAL_INPUT_PTR,
             stream_channel_map,
             stream_num_channels,
             stream_capture_channels,
             stream_chunk_samples,
-            stream_output[output_slot]
+            STREAM_OUTPUT_PTR(output_slot)
         );
 
         /* Make compressed data visible to Core 1 before incrementing counter */
@@ -489,9 +501,9 @@ void stream_process_transmit(void)
 
         /* Copy to local buffer to prevent reading partially-overwritten data */
         uint32_t size = stream_output_size[slot];
-        memcpy(transmit_local_buf, stream_output[slot], size);
+        memcpy(STREAM_LOCAL_TRANSMIT_PTR, STREAM_OUTPUT_PTR(slot), size);
 
-        stream_send_chunk(transmit_local_buf, size);
+        stream_send_chunk(STREAM_LOCAL_TRANSMIT_PTR, size);
         transmit_count++;
         chunks_sent++;
 

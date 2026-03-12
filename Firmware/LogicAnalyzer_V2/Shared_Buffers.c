@@ -8,3 +8,4 @@ EVENT_MACHINE frontendToWifi;
 EVENT_MACHINE usbToFrontend;
 EVENT_MACHINE frontendToUsb;
 USB_BULK_TRANSFER usb_bulk;
+uint8_t captureBuffer[CAPTURE_BUFFER_SIZE] __attribute__((aligned(4)));
