@@ -326,8 +326,12 @@ export class WaveformRenderer {
   /**
    * Trace the waveform shape onto the current path.
    * Uses RLE: only emits lineTo at transitions.
+   * Draws slanted transitions so it's easy to see exactly between
+   * which two samples a value change occurred.
    */
   _traceWaveform(ctx, samples, firstSample, lastSample, sampleWidth, yHi, yLo) {
+    const slantHalf = Math.min(sampleWidth * 0.15, 4)
+
     let currentValue = samples[firstSample]
     let currentY = currentValue ? yHi : yLo
     ctx.moveTo(0, currentY)
@@ -336,10 +340,10 @@ export class WaveformRenderer {
       const val = samples[i]
       if (val !== currentValue) {
         const x = (i - firstSample) * sampleWidth
-        ctx.lineTo(x, currentY)
+        ctx.lineTo(x - slantHalf, currentY)
         currentValue = val
         currentY = val ? yHi : yLo
-        ctx.lineTo(x, currentY)
+        ctx.lineTo(x + slantHalf, currentY)
       }
     }
 
