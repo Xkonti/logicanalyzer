@@ -1,7 +1,4 @@
 #include "LogicAnalyzer_Board_Settings.h"
-
-#ifdef USE_CYGW_WIFI
-
 #include "Event_Machine.h"
 #include "Shared_Buffers.h"
 #include "LogicAnalyzer_WiFi.h"
@@ -436,5 +433,3 @@ void runWiFiCore()
             cyw43_arch_poll();
     }
 }
-
-#endif

@@ -54,9 +54,7 @@
         uint32_t frequency;
     } STREAM_REQUEST;
 
-    #ifdef USE_CYGW_WIFI
-
-        typedef struct _WIFI_SETTINGS
+    typedef struct _WIFI_SETTINGS
         {
             char apName[33];
             char passwd[64];
@@ -163,8 +161,6 @@
             volatile bool pending;
             volatile bool complete;
 
-        } USB_BULK_TRANSFER;
-
-    #endif
+    } USB_BULK_TRANSFER;
 
 #endif

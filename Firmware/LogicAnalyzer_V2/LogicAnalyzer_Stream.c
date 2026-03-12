@@ -9,7 +9,6 @@
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/timer.h"
 #include "pico/multicore.h"
-#include "pico/stdio_usb.h"
 #include "LogicAnalyzer.pio.h"
 #include "tusb.h"
 #include <string.h>
@@ -18,14 +17,12 @@
 /* External functions from LogicAnalyzer.c */
 extern void sendResponse(const char* response, bool toWiFi);
 
-#ifdef USE_CYGW_WIFI
 extern void wifi_transfer(unsigned char* data, int len);
 /* usb_bulk_transfer_blocking is for Core 0 → Core 1 handoff (capture data, handshake).
  * During streaming, Core 1 uses usb_cdc_write_bulk directly (it owns TinyUSB). */
 extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
 /* Direct Core 1 USB write — defined in LogicAnalyzer_WiFi.c */
 extern void usb_cdc_write_bulk_ext(const uint8_t* data, uint32_t len);
-#endif
 
 
 /* ---- Ring buffers ---- */
@@ -36,9 +33,7 @@ static uint32_t stream_output_size[STREAM_SLOTS];
 /* ---- Local copy buffers (prevent reading partially-overwritten data) ---- */
 static uint8_t  compress_local_input[STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
 
-#ifdef USE_CYGW_WIFI
 static uint8_t  transmit_local_buf[STREAM_OUTPUT_SLOT_SIZE]   __attribute__((aligned(4)));
-#endif
 
 /* ---- Producer-consumer counters (monotonically increasing) ---- */
 static volatile uint32_t dma_complete_count;        /* written by DMA ISR (Core 0) */
@@ -301,19 +296,10 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     info[6] = (stream_actual_freq >> 16) & 0xFF;
     info[7] = (stream_actual_freq >> 24) & 0xFF;
 
-    #ifdef USE_CYGW_WIFI
     if (fromWiFi)
         wifi_transfer(info, 8);
     else
         usb_bulk_transfer_blocking(info, 8);
-    #else
-    {
-        for (int i = 0; i < 8; i++)
-            putchar_raw(info[i]);
-        stdio_flush();
-        sleep_ms(10);
-    }
-    #endif
 
     /* Signal Core 1 to start transmission */
     __dmb();
@@ -398,8 +384,6 @@ void RunCompressionLoop(void)
 /* ------------------------------------------------------------------ */
 /*  Core 1 — Non-blocking transmission                                 */
 /* ------------------------------------------------------------------ */
-
-#ifdef USE_CYGW_WIFI
 
 /* Helper: send size + data via the appropriate transport.
  * Called on Core 1 — uses direct USB write (not the bulk transfer handoff). */
@@ -538,8 +522,6 @@ void stream_process_transmit(void)
         stream_transmit_active = false;
     }
 }
-
-#endif /* USE_CYGW_WIFI */
 
 void CleanupStream(void)
 {
