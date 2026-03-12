@@ -6,6 +6,7 @@
 #include "Shared_Buffers.h"
 #include "LogicAnalyzer_WiFi.h"
 #include "LogicAnalyzer_Structs.h"
+#include "LogicAnalyzer_Stream.h"
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
@@ -360,8 +361,9 @@ static void usbSendEvent(void* event)
     }
 }
 
-/* Efficient bulk write for large data transfers (capture data) */
-static void usb_cdc_write_bulk(const uint8_t* data, uint32_t len)
+/* Efficient bulk write for large data transfers.
+ * Used internally for capture data, and externally by stream_process_transmit. */
+void usb_cdc_write_bulk_ext(const uint8_t* data, uint32_t len)
 {
     uint32_t left = len;
     uint32_t pos = 0;
@@ -385,7 +387,7 @@ static void usb_cdc_write_bulk(const uint8_t* data, uint32_t len)
 /* Send pending bulk transfer (capture data) */
 static void usb_send_bulk_transfer(void)
 {
-    usb_cdc_write_bulk(usb_bulk.data, usb_bulk.length);
+    usb_cdc_write_bulk_ext(usb_bulk.data, usb_bulk.length);
     __dmb();
     usb_bulk.pending = false;  /* prevent re-entry before Core 0 wakes */
     __dmb();
@@ -422,6 +424,10 @@ void runWiFiCore()
         /* USB bulk: send capture data if pending */
         if (usb_bulk.pending)
             usb_send_bulk_transfer();
+
+        /* Streaming transmission (when active) */
+        if (stream_transmit_active)
+            stream_process_transmit();
 
         /* WiFi processing */
         event_process_queue(&frontendToWifi, &frontendEventBuffer, 8);

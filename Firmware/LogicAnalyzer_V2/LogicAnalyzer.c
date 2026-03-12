@@ -842,9 +842,19 @@ int main()
         else if(streaming_active)
         {
             #ifdef USE_CYGW_WIFI
-                RunStreamSendLoop(dataFromWiFi);
+                /* Core 0: compress DMA data into compressed ring buffer.
+                 * Core 1 transmits from the compressed ring in parallel. */
+                RunCompressionLoop();
+
+                /* Wait for Core 1 to finish draining + sending EOF */
+                while (stream_transmit_active)
+                {
+                    /* Keep processing input events so stop commands arrive */
+                    processInput();
+                    tight_loop_contents();
+                }
             #else
-                RunStreamSendLoop(false);
+                #error "Streaming requires USE_CYGW_WIFI (WiFi build)"
             #endif
             CleanupStream();
             streaming_active = false;

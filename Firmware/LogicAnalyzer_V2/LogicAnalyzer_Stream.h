@@ -13,8 +13,8 @@
 
 /*
  * Start streaming capture.
- * Sets up PIO, DMA ring buffer, launches Core 1 for compression,
- * sends STREAM_STARTED response + info header.
+ * Sets up PIO, DMA ring buffer, sends STREAM_STARTED response + info header,
+ * sets stream_transmit_active for Core 1, enables PIO.
  * Returns true on success.
  */
 bool StartStream(const STREAM_REQUEST *req, bool fromWiFi);
@@ -26,17 +26,29 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi);
 void StopStream(void);
 
 /*
- * Blocking send loop. Runs on Core 0, sends compressed chunks over USB.
+ * Compression loop — runs on Core 0.
+ * Reads DMA input ring, compresses chunks, writes to compressed ring.
  * Returns when streaming stops (via StopStream or overflow).
- * Sends EOF marker and termination line before returning.
+ * Sets compress_done flag before returning.
  */
-void RunStreamSendLoop(bool fromWiFi);
+void RunCompressionLoop(void);
 
 /*
- * Cleanup: stop PIO, abort DMA, reset Core 1.
- * Called after RunStreamSendLoop returns.
+ * Non-blocking transmit — called by Core 1 each iteration.
+ * Reads compressed chunks from the compressed ring, sends via USB/WiFi.
+ * Sends EOF + status when compression is done and all chunks are drained.
+ * Sets stream_transmit_active = false when fully complete.
+ */
+void stream_process_transmit(void);
+
+/*
+ * Cleanup: stop PIO, abort DMA.
+ * Called by Core 0 after stream_transmit_active becomes false.
  */
 void CleanupStream(void);
+
+/* Returns true if Core 1 transmission is still active */
+extern volatile bool stream_transmit_active;
 
 /* Returns true if currently streaming */
 bool IsStreamActive(void);

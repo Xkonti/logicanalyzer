@@ -20,24 +20,39 @@ extern void sendResponse(const char* response, bool toWiFi);
 
 #ifdef USE_CYGW_WIFI
 extern void wifi_transfer(unsigned char* data, int len);
+/* usb_bulk_transfer_blocking is for Core 0 → Core 1 handoff (capture data, handshake).
+ * During streaming, Core 1 uses usb_cdc_write_bulk directly (it owns TinyUSB). */
+extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
+/* Direct Core 1 USB write — defined in LogicAnalyzer_WiFi.c */
+extern void usb_cdc_write_bulk_ext(const uint8_t* data, uint32_t len);
 #endif
 
 
-/* ---- Ring buffer ---- */
+/* ---- Ring buffers ---- */
 static uint8_t  stream_input[STREAM_SLOTS][STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
 static uint8_t  stream_output[STREAM_SLOTS][STREAM_OUTPUT_SLOT_SIZE] __attribute__((aligned(4)));
 static uint32_t stream_output_size[STREAM_SLOTS];
 
+/* ---- Local copy buffers (prevent reading partially-overwritten data) ---- */
+static uint8_t  compress_local_input[STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
+
+#ifdef USE_CYGW_WIFI
+static uint8_t  transmit_local_buf[STREAM_OUTPUT_SLOT_SIZE]   __attribute__((aligned(4)));
+#endif
+
 /* ---- Producer-consumer counters (monotonically increasing) ---- */
-static volatile uint32_t dma_complete_count;   /* written by DMA ISR */
-static volatile uint32_t compress_head;        /* written by Core 1 */
-static volatile uint32_t send_head;            /* written by Core 0 */
+static volatile uint32_t dma_complete_count;        /* written by DMA ISR (Core 0) */
+static volatile uint32_t compress_complete_count;   /* written by Core 0 compression */
+static volatile uint32_t transmit_count;            /* written by Core 1 transmission */
 
 /* ---- Streaming state ---- */
 static volatile bool streaming;
 static volatile bool overflow;
+static volatile bool compress_done;          /* Core 0 sets when compression loop exits */
+volatile bool stream_transmit_active;        /* Core 0 sets true at start, Core 1 clears when done */
+static bool stream_from_wifi;                /* set once at StartStream, read by Core 1 */
 
-/* ---- Capture parameters (set at stream start, read by Core 1) ---- */
+/* ---- Capture parameters (set at stream start) ---- */
 static uint32_t stream_num_channels;     /* number of selected channels */
 static uint32_t stream_capture_channels; /* total channels in capture mode (8/16/24) */
 static uint8_t  stream_channel_map[24];  /* maps selected index → DMA bit position */
@@ -133,41 +148,6 @@ static void configure_stream_dma(CHANNEL_MODE mode)
     dma_channel_configure(stream_dma0, &c0,
         stream_input[0], &stream_pio->rxf[stream_sm],
         stream_chunk_samples, true);
-}
-
-/* ------------------------------------------------------------------ */
-/*  Core 1 — compression loop                                         */
-/* ------------------------------------------------------------------ */
-
-static void stream_core1_entry(void)
-{
-    stream_compress_init();   /* set bus priority for Core 1 */
-
-    while (streaming)
-    {
-        if (compress_head < dma_complete_count)
-        {
-            uint32_t slot = compress_head % STREAM_SLOTS;
-
-            stream_output_size[slot] = stream_compress_chunk_mapped(
-                stream_input[slot],
-                stream_channel_map,
-                stream_num_channels,
-                stream_capture_channels,
-                stream_chunk_samples,
-                stream_output[slot]
-            );
-
-            __dmb();   /* ensure output data is visible to Core 0 */
-            compress_head++;
-        }
-        else
-        {
-            tight_loop_contents();
-        }
-    }
-
-    stream_compress_deinit();
 }
 
 /* ------------------------------------------------------------------ */
@@ -278,12 +258,14 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
         stream_chunk_samples = chunk;
     }
 
-    /* Reset counters */
-    dma_complete_count = 0;
-    compress_head      = 0;
-    send_head          = 0;
-    overflow           = false;
-    streaming          = true;
+    /* Reset counters and flags */
+    dma_complete_count      = 0;
+    compress_complete_count = 0;
+    transmit_count          = 0;
+    overflow                = false;
+    compress_done           = false;
+    streaming               = true;
+    stream_from_wifi        = fromWiFi;
 
     memset(stream_output_size, 0, sizeof(stream_output_size));
 
@@ -297,6 +279,7 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     /* Setup DMA ring buffer */
     configure_stream_dma(mode);
 
+    /* Send handshake + info header */
     sendResponse("STREAM_STARTED\n", fromWiFi);
 
     uint8_t info[8];
@@ -313,10 +296,7 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     if (fromWiFi)
         wifi_transfer(info, 8);
     else
-    {
-        extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
         usb_bulk_transfer_blocking(info, 8);
-    }
     #else
     {
         for (int i = 0; i < 8; i++)
@@ -326,7 +306,11 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     }
     #endif
 
-    /* Enable PIO — capture begins */
+    /* Signal Core 1 to start transmission */
+    __dmb();
+    stream_transmit_active = true;
+
+    /* Enable PIO — sampling begins */
     pio_sm_set_enabled(stream_pio, stream_sm, true);
 
     return true;
@@ -337,10 +321,150 @@ void StopStream(void)
     streaming = false;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Core 0 — Compression loop                                         */
+/* ------------------------------------------------------------------ */
+
+void RunCompressionLoop(void)
+{
+    extern void processInput(void);
+
+    stream_compress_init();   /* set bus priority for Core 0 during compression */
+
+    uint32_t compress_read_count = 0;
+
+    while (streaming)
+    {
+        /* Busy-poll until input ready, processing commands while waiting */
+        if (compress_read_count >= dma_complete_count)
+        {
+            processInput();  /* check for stop command */
+            tight_loop_contents();
+            continue;
+        }
+
+        /* Overflow detection: DMA is about to overwrite uncompressed slots.
+         * 2 slots are unsafe (chained DMA currently writing + next). */
+        uint32_t pending = dma_complete_count - compress_read_count;
+        if (pending >= STREAM_SLOTS - 2)
+        {
+            /* Skip ahead — can't compress slots that are being overwritten */
+            compress_read_count = dma_complete_count - 1;
+        }
+
+        /* Copy input slot to local buffer (prevent partial overwrite during compression) */
+        uint32_t input_slot = compress_read_count % STREAM_SLOTS;
+        memcpy(compress_local_input, stream_input[input_slot], STREAM_INPUT_SLOT_SIZE);
+
+        /* Compress into the output ring */
+        uint32_t output_slot = compress_complete_count % STREAM_SLOTS;
+
+        stream_output_size[output_slot] = stream_compress_chunk_mapped(
+            compress_local_input,
+            stream_channel_map,
+            stream_num_channels,
+            stream_capture_channels,
+            stream_chunk_samples,
+            stream_output[output_slot]
+        );
+
+        /* Make compressed data visible to Core 1 before incrementing counter */
+        __dmb();
+        compress_complete_count++;
+        compress_read_count++;
+
+        /* Check if compressed ring is full (Core 1 can't keep up) */
+        if (compress_complete_count - transmit_count >= STREAM_SLOTS - 1)
+        {
+            overflow = true;
+            streaming = false;
+        }
+    }
+
+    stream_compress_deinit();
+
+    /* Signal Core 1 that no more compressed data will be produced */
+    __dmb();
+    compress_done = true;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Core 1 — Non-blocking transmission                                 */
+/* ------------------------------------------------------------------ */
+
+#ifdef USE_CYGW_WIFI
+
+/* Helper: send size + data via the appropriate transport.
+ * Called on Core 1 — uses direct USB write (not the bulk transfer handoff). */
+static void stream_send_chunk(const uint8_t* data, uint32_t size)
+{
+    uint16_t sz = (uint16_t)size;
+    uint8_t size_bytes[2] = { sz & 0xFF, (sz >> 8) & 0xFF };
+
+    if (stream_from_wifi)
+    {
+        wifi_transfer(size_bytes, 2);
+        wifi_transfer((unsigned char*)data, sz);
+    }
+    else
+    {
+        usb_cdc_write_bulk_ext(size_bytes, 2);
+        usb_cdc_write_bulk_ext(data, sz);
+    }
+}
+
+static void stream_send_eof(void)
+{
+    uint8_t eof[2] = { 0x00, 0x00 };
+    if (stream_from_wifi)
+        wifi_transfer(eof, 2);
+    else
+        usb_cdc_write_bulk_ext(eof, 2);
+}
+
+void stream_process_transmit(void)
+{
+    /* Process available compressed chunks, but limit per call to avoid
+     * starving tud_task() and other Core 1 responsibilities */
+    uint32_t chunks_sent = 0;
+    while (transmit_count < compress_complete_count && chunks_sent < 4)
+    {
+        __dmb();  /* acquire barrier — ensure we see Core 0's compressed data */
+
+        uint32_t slot = transmit_count % STREAM_SLOTS;
+
+        /* Copy to local buffer to prevent reading partially-overwritten data */
+        uint32_t size = stream_output_size[slot];
+        memcpy(transmit_local_buf, stream_output[slot], size);
+
+        stream_send_chunk(transmit_local_buf, size);
+        transmit_count++;
+        chunks_sent++;
+    }
+
+    /* Check if compression is done and all data has been transmitted */
+    if (compress_done && transmit_count >= compress_complete_count)
+    {
+        __dmb();
+
+        /* Send EOF marker */
+        stream_send_eof();
+
+        /* Send termination status */
+        if (overflow)
+            sendResponse("STREAM_OVERFLOW\n", stream_from_wifi);
+        else
+            sendResponse("STREAM_DONE\n", stream_from_wifi);
+
+        /* Signal Core 0 that transmission is complete */
+        stream_transmit_active = false;
+    }
+}
+
+#endif /* USE_CYGW_WIFI */
+
 void CleanupStream(void)
 {
-    /* Core 1 (WiFi) was never stopped — no reset needed */
-
     /* Stop PIO */
     pio_sm_set_enabled(stream_pio, stream_sm, false);
 
@@ -358,112 +482,6 @@ void CleanupStream(void)
     /* Cleanup PIO */
     pio_sm_unclaim(stream_pio, stream_sm);
     pio_remove_program(stream_pio, &BLAST_CAPTURE_program, stream_pio_offset);
-
-    /* stdio_usb was never disabled — no reinit needed */
-}
-
-void RunStreamSendLoop(bool fromWiFi)
-{
-    #ifdef USE_CYGW_WIFI
-    extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
-    #endif
-
-    while (streaming)
-    {
-        /* Compress and send chunks as DMA completes them (inline on Core 0) */
-        if (send_head < dma_complete_count)
-        {
-            uint32_t slot = send_head % STREAM_SLOTS;
-
-            /* Compress inline — Core 1 (WiFi) is left running */
-            uint32_t compressed_size = stream_compress_chunk_mapped(
-                stream_input[slot],
-                stream_channel_map,
-                stream_num_channels,
-                stream_capture_channels,
-                stream_chunk_samples,
-                stream_output[slot]
-            );
-
-            uint16_t size = (uint16_t)compressed_size;
-            uint8_t size_bytes[2] = { size & 0xFF, (size >> 8) & 0xFF };
-
-            #ifdef USE_CYGW_WIFI
-            if (fromWiFi)
-            {
-                wifi_transfer(size_bytes, 2);
-                wifi_transfer(stream_output[slot], size);
-            }
-            else
-            {
-                usb_bulk_transfer_blocking(size_bytes, 2);
-                usb_bulk_transfer_blocking(stream_output[slot], size);
-            }
-            #else
-            {
-                /* Non-WiFi build: direct USB via putchar_raw (legacy path) */
-                for (uint32_t i = 0; i < 2; i++)
-                    putchar_raw(size_bytes[i]);
-                for (uint32_t i = 0; i < size; i++)
-                    putchar_raw(stream_output[slot][i]);
-                stdio_flush();
-            }
-            #endif
-            send_head++;
-        }
-
-        /* Check for incoming stop command */
-        #ifdef USE_CYGW_WIFI
-        {
-            extern void processInput(void);
-            processInput();
-        }
-        #else
-        {
-            extern bool processUSBInput(bool skipProcessing);
-            while (processUSBInput(false))
-            {
-                if (!streaming)
-                    break;
-            }
-
-            /* Detect USB disconnect */
-            if (!tud_cdc_connected())
-            {
-                streaming = false;
-                break;
-            }
-        }
-        #endif
-
-        /* Overflow detection: DMA is about to overwrite unprocessed slots */
-        if (dma_complete_count - send_head >= STREAM_SLOTS - 1)
-        {
-            overflow = true;
-            streaming = false;
-        }
-    }
-
-    /* Send EOF marker */
-    uint8_t eof[2] = { 0x00, 0x00 };
-    #ifdef USE_CYGW_WIFI
-    if (fromWiFi)
-        wifi_transfer(eof, 2);
-    else
-        usb_bulk_transfer_blocking(eof, 2);
-    #else
-    {
-        putchar_raw(0x00);
-        putchar_raw(0x00);
-        stdio_flush();
-    }
-    #endif
-
-    /* Send termination status line (JS readLine() expects this after EOF) */
-    if (overflow)
-        sendResponse("STREAM_OVERFLOW\n", fromWiFi);
-    else
-        sendResponse("STREAM_DONE\n", fromWiFi);
 }
 
 bool IsStreamActive(void)
