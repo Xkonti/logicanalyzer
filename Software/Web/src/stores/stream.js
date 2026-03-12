@@ -53,13 +53,38 @@ export const useStreamStore = defineStore('stream', () => {
   const totalDmaSkips = ref(0)
   const totalTransmitSkips = ref(0)
 
+  // Loss region tracking (absolute sample coordinates)
+  const lossRegions = shallowRef([]) // { absoluteFirst, absoluteLast }[]
+  const displayOffset = ref(0) // absoluteSamplesReceived - displayBufferLength
+
   // Computed
   const hasStream = computed(() => streaming.value && streamChannels.value.length > 0)
   const totalSamples = computed(() => sampleCount.value)
 
+  const displayLossRegions = computed(() => {
+    const offset = displayOffset.value
+    const count = sampleCount.value
+    if (count === 0) return []
+
+    const result = []
+    for (const region of lossRegions.value) {
+      const first = region.absoluteFirst - offset
+      const last = region.absoluteLast - offset
+      if (last < 0) continue
+      if (first >= count) continue
+      result.push({
+        firstSample: Math.max(0, first),
+        lastSample: Math.min(count - 1, last),
+      })
+    }
+    return result
+  })
+
   // Time-based batching state (non-reactive for performance)
   let pendingChunks = []
   let lastFlushTime = 0
+  let absoluteSamplesReceived = 0
+  let samplesSinceLastReport = 0
   const FLUSH_INTERVAL_MS = 16 // ~60fps
 
   /**
@@ -79,6 +104,9 @@ export const useStreamStore = defineStore('stream', () => {
    * from microtask-driven read loops.
    */
   function onChunk(channels, chunkSamples) {
+    absoluteSamplesReceived += chunkSamples
+    samplesSinceLastReport += chunkSamples
+
     const unpacked = channels.map((ch) => unpackBitstream(ch, chunkSamples))
     pendingChunks.push({ unpacked, chunkSamples })
 
@@ -121,6 +149,14 @@ export const useStreamStore = defineStore('stream', () => {
       `Data loss detected: ${total} skipped chunks` +
       ` (${totalDmaSkips.value} DMA, ${totalTransmitSkips.value} transmit)` +
       ` — try lowering the sample rate`
+
+    // Mark samples received since the last report as a lossy region
+    if (samplesSinceLastReport > 0) {
+      const absoluteLast = absoluteSamplesReceived - 1
+      const absoluteFirst = absoluteLast - samplesSinceLastReport + 1
+      lossRegions.value = [...lossRegions.value, { absoluteFirst, absoluteLast }]
+      samplesSinceLastReport = 0
+    }
   }
 
   function flushChunks() {
@@ -162,6 +198,14 @@ export const useStreamStore = defineStore('stream', () => {
     streamChannels.value = updated
     sampleCount.value = updated[0]?.samples?.length ?? 0
 
+    // Update display offset for loss region coordinate mapping and prune old regions
+    displayOffset.value = absoluteSamplesReceived - sampleCount.value
+    const offset = displayOffset.value
+    const regions = lossRegions.value
+    if (regions.length > 0 && regions[0].absoluteLast < offset) {
+      lossRegions.value = regions.filter((r) => r.absoluteLast >= offset)
+    }
+
     // Auto-scroll viewport to follow latest data
     if (following.value) {
       const viewport = useViewportStore()
@@ -202,6 +246,10 @@ export const useStreamStore = defineStore('stream', () => {
     streamWarning.value = null
     totalDmaSkips.value = 0
     totalTransmitSkips.value = 0
+    lossRegions.value = []
+    displayOffset.value = 0
+    absoluteSamplesReceived = 0
+    samplesSinceLastReport = 0
 
     const channelNumbers = channelsToStream.map((ch) => ch.channelNumber)
     const freq = streamFrequency.value
@@ -271,6 +319,10 @@ export const useStreamStore = defineStore('stream', () => {
     lastFlushTime = 0
     totalDmaSkips.value = 0
     totalTransmitSkips.value = 0
+    lossRegions.value = []
+    displayOffset.value = 0
+    absoluteSamplesReceived = 0
+    samplesSinceLastReport = 0
     const device = useDeviceStore()
     device.streaming = false
   }
@@ -289,6 +341,7 @@ export const useStreamStore = defineStore('stream', () => {
     totalSamples,
     totalDmaSkips,
     totalTransmitSkips,
+    displayLossRegions,
     startStream,
     stopStream,
     clearStream,

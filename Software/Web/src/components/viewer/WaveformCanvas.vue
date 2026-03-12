@@ -11,6 +11,7 @@
 <script setup>
 import { ref, shallowRef, watchEffect, computed, onMounted, onBeforeUnmount } from 'vue'
 import { WaveformRenderer, MIN_CHANNEL_HEIGHT } from 'src/core/renderer/waveform-renderer.js'
+import { COLORS } from 'src/core/renderer/colors.js'
 import { useViewportStore } from 'src/stores/viewport.js'
 import { useCapture } from 'src/composables/useCapture.js'
 import { useStream } from 'src/composables/useStream.js'
@@ -141,7 +142,13 @@ watchEffect(() => {
   if (stream.isStreaming || stream.streamChannels.length > 0) {
     renderer.value.setPreTriggerSamples(0)
     renderer.value.setBursts([])
-    renderer.value.setRegions([])
+    renderer.value.setRegions(
+      stream.lossRegions.map((r) => ({
+        firstSample: r.firstSample,
+        lastSample: r.lastSample,
+        regionColor: COLORS.dataLossFill,
+      })),
+    )
   } else {
     renderer.value.setPreTriggerSamples(cap.preTriggerSamples)
     renderer.value.setBursts(mapBursts(cap.bursts))

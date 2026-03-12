@@ -32,6 +32,7 @@ export function useStream() {
 
   // Data
   const streamChannels = computed(() => stream.streamChannels)
+  const lossRegions = computed(() => stream.displayLossRegions)
 
   // Capability
   const canStartStream = computed(
@@ -85,6 +86,7 @@ export function useStream() {
 
     // Data
     streamChannels,
+    lossRegions,
 
     // Capability
     canStartStream,

@@ -43,6 +43,7 @@ export const COLORS = {
   burstPen: 'rgb(224,175,29)',
   burstFill: 'rgba(224,175,29,0.5)',
   selectionFill: 'rgba(255,255,255,0.5)',
+  dataLossFill: 'rgba(140, 30, 30, 0.35)',
   timelineBackground: 'rgb(28,28,28)',
   timelineTick: 'rgba(255,255,255,0.7)',
 }
