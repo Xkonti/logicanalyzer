@@ -409,9 +409,10 @@ export class AnalyzerDriver {
    * @param {number} config.frequency - sampling frequency in Hz
    * @param {(channels: Uint8Array[], chunkSamples: number) => void} onChunk
    * @param {(endStatus: string|null, error: string|null) => void} onEnd
+   * @param {(report: {dmaSkips: number, txSkips: number}) => void} [onSkipReport]
    * @returns {Promise<{started: boolean, chunkSamples?: number, numChannels?: number}>}
    */
-  async startStream(config, onChunk, onEnd) {
+  async startStream(config, onChunk, onEnd, onSkipReport) {
     if (this.#capturing || this.#streaming) return { started: false }
     if (!this.#transport?.connected) return { started: false }
 
@@ -470,7 +471,7 @@ export class AnalyzerDriver {
 
       // Fire-and-forget the read loop
       this.#streamEndStatus = null
-      this.#readStreamLoop(numChannels, chunkSamples, onChunk, onEnd)
+      this.#readStreamLoop(numChannels, chunkSamples, onChunk, onEnd, onSkipReport)
 
       return { started: true, chunkSamples, numChannels, actualFrequency }
     } catch (err) {
@@ -484,7 +485,7 @@ export class AnalyzerDriver {
   /**
    * Internal async loop that reads compressed stream chunks until EOF.
    */
-  async #readStreamLoop(numChannels, chunkSamples, onChunk, onEnd) {
+  async #readStreamLoop(numChannels, chunkSamples, onChunk, onEnd, onSkipReport) {
     let chunksReceived = 0
     try {
       console.log(`[stream] read loop started: ${numChannels}ch, ${chunkSamples} samples/chunk`)
@@ -496,6 +497,28 @@ export class AnalyzerDriver {
         )
         const compressedSize = sizeBytes[0] | (sizeBytes[1] << 8)
         if (compressedSize === 0) break // EOF marker
+
+        // Skip report frame: 0xFFFF marker
+        if (compressedSize === 0xffff) {
+          const countBytes = await this.#transport.readBytes(1)
+          const count = countBytes[0]
+          const compressSkipsRaw = await this.#transport.readBytes(count * 2)
+          const transmitSkipsRaw = await this.#transport.readBytes(count * 2)
+
+          // Sum uint16 LE entries
+          let dmaSkips = 0
+          let txSkips = 0
+          for (let i = 0; i < count; i++) {
+            dmaSkips += compressSkipsRaw[i * 2] | (compressSkipsRaw[i * 2 + 1] << 8)
+            txSkips += transmitSkipsRaw[i * 2] | (transmitSkipsRaw[i * 2 + 1] << 8)
+          }
+
+          if (dmaSkips > 0 || txSkips > 0) {
+            console.warn(`[stream] skip report: ${dmaSkips} DMA skips, ${txSkips} transmit skips`)
+            onSkipReport?.({ dmaSkips, txSkips })
+          }
+          continue
+        }
 
         const compressed = await withTimeout(
           this.#transport.readBytes(compressedSize),

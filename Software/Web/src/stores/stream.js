@@ -49,6 +49,10 @@ export const useStreamStore = defineStore('stream', () => {
   const sampleCount = ref(0)
   const following = ref(true)
 
+  // Skip detection
+  const totalDmaSkips = ref(0)
+  const totalTransmitSkips = ref(0)
+
   // Computed
   const hasStream = computed(() => streaming.value && streamChannels.value.length > 0)
   const totalSamples = computed(() => sampleCount.value)
@@ -95,9 +99,7 @@ export const useStreamStore = defineStore('stream', () => {
     if (error) {
       streamError.value = error
     }
-    if (endStatus?.startsWith('STREAM_OVERFLOW')) {
-      streamWarning.value = 'Stream ended due to overflow — data rate exceeded device capacity'
-    } else if (endStatus?.startsWith('STREAM_TIMEOUT')) {
+    if (endStatus?.startsWith('STREAM_TIMEOUT')) {
       streamError.value = `Stream timeout — no data produced. Debug: ${endStatus}`
     } else if (endStatus?.startsWith('STREAM_DISCONN')) {
       streamError.value = 'Stream ended — device detected USB disconnect'
@@ -105,6 +107,20 @@ export const useStreamStore = defineStore('stream', () => {
     streaming.value = false
     const device = useDeviceStore()
     device.streaming = false
+  }
+
+  /**
+   * Called by the driver when a skip report frame is received.
+   */
+  function onSkipReport({ dmaSkips, txSkips }) {
+    totalDmaSkips.value += dmaSkips
+    totalTransmitSkips.value += txSkips
+
+    const total = totalDmaSkips.value + totalTransmitSkips.value
+    streamWarning.value =
+      `Data loss detected: ${total} skipped chunks` +
+      ` (${totalDmaSkips.value} DMA, ${totalTransmitSkips.value} transmit)` +
+      ` — try lowering the sample rate`
   }
 
   function flushChunks() {
@@ -184,6 +200,8 @@ export const useStreamStore = defineStore('stream', () => {
 
     streamError.value = null
     streamWarning.value = null
+    totalDmaSkips.value = 0
+    totalTransmitSkips.value = 0
 
     const channelNumbers = channelsToStream.map((ch) => ch.channelNumber)
     const freq = streamFrequency.value
@@ -212,6 +230,7 @@ export const useStreamStore = defineStore('stream', () => {
       { channels: channelNumbers, frequency: freq, chunkSamples: streamChunkSize.value },
       onChunk,
       onStreamEnd,
+      onSkipReport,
     )
 
     console.log('[stream] driver.startStream returned', result)
@@ -250,6 +269,8 @@ export const useStreamStore = defineStore('stream', () => {
     following.value = true
     pendingChunks = []
     lastFlushTime = 0
+    totalDmaSkips.value = 0
+    totalTransmitSkips.value = 0
     const device = useDeviceStore()
     device.streaming = false
   }
@@ -266,6 +287,8 @@ export const useStreamStore = defineStore('stream', () => {
     following,
     hasStream,
     totalSamples,
+    totalDmaSkips,
+    totalTransmitSkips,
     startStream,
     stopStream,
     clearStream,
