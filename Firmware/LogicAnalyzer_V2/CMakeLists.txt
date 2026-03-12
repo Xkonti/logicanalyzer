@@ -118,6 +118,9 @@ endif()
 if(BOARD_TYPE STREQUAL "BOARD_PICO_W_WIFI")
     message(STATUS "Configuring for Pico W with WiFi support")
     add_compile_definitions(BUILD_PICO_W_WIFI)
+    # Disable background timer that calls tud_task() on Core 0.
+    # Core 1 will exclusively handle all TinyUSB polling.
+    add_compile_definitions(PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=0)
     set (CYW_LIB pico_cyw43_arch_lwip_poll)
 endif()
 if(BOARD_TYPE STREQUAL "BOARD_PICO_2_W")
@@ -131,6 +134,9 @@ if(BOARD_TYPE STREQUAL "BOARD_PICO_2_W_WIFI")
     message(STATUS "Configuring for Pico W with WiFi support")
     add_compile_definitions(BUILD_PICO_2_W_WIFI)
     add_compile_definitions(CORE_TYPE_2)
+    # Disable background timer that calls tud_task() on Core 0.
+    # Core 1 will exclusively handle all TinyUSB polling.
+    add_compile_definitions(PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=0)
     set (CYW_LIB pico_cyw43_arch_lwip_poll)
 endif()
 if(BOARD_TYPE STREQUAL "BOARD_ZERO")

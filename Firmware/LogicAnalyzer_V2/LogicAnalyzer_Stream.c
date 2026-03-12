@@ -297,8 +297,6 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     /* Setup DMA ring buffer */
     configure_stream_dma(mode);
 
-    /* Send handshake text + 8-byte info header BEFORE stdio_usb_deinit.
-     * cdc_transfer does NOT work reliably after stdio_usb_deinit. */
     sendResponse("STREAM_STARTED\n", fromWiFi);
 
     uint8_t info[8];
@@ -315,18 +313,18 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     if (fromWiFi)
         wifi_transfer(info, 8);
     else
-    #endif
+    {
+        extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
+        usb_bulk_transfer_blocking(info, 8);
+    }
+    #else
     {
         for (int i = 0; i < 8; i++)
             putchar_raw(info[i]);
         stdio_flush();
         sleep_ms(10);
     }
-
-    /* Keep stdio_usb active — data is sent via putchar_raw (stdio-safe).
-     * stdio_usb_deinit() breaks cdc_transfer in the streaming context
-     * (works in capture mode but not streaming — root cause unknown).
-     * With stdio active, the background timer handles tud_task(). */
+    #endif
 
     /* Enable PIO — capture begins */
     pio_sm_set_enabled(stream_pio, stream_sm, true);
@@ -364,18 +362,12 @@ void CleanupStream(void)
     /* stdio_usb was never disabled — no reinit needed */
 }
 
-/* Send raw bytes via stdio (putchar_raw). Stdio is kept active during
- * streaming, so this is safe — the background timer handles tud_task()
- * and the stdio mutex prevents reentrancy. */
-static void stream_raw_write(const uint8_t* data, uint32_t len)
-{
-    for (uint32_t i = 0; i < len; i++)
-        putchar_raw(data[i]);
-    stdio_flush();
-}
-
 void RunStreamSendLoop(bool fromWiFi)
 {
+    #ifdef USE_CYGW_WIFI
+    extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
+    #endif
+
     while (streaming)
     {
         /* Compress and send chunks as DMA completes them (inline on Core 0) */
@@ -403,27 +395,30 @@ void RunStreamSendLoop(bool fromWiFi)
                 wifi_transfer(stream_output[slot], size);
             }
             else
-            #endif
             {
-                stream_raw_write(size_bytes, 2);
-                stream_raw_write(stream_output[slot], size);
+                usb_bulk_transfer_blocking(size_bytes, 2);
+                usb_bulk_transfer_blocking(stream_output[slot], size);
             }
+            #else
+            {
+                /* Non-WiFi build: direct USB via putchar_raw (legacy path) */
+                for (uint32_t i = 0; i < 2; i++)
+                    putchar_raw(size_bytes[i]);
+                for (uint32_t i = 0; i < size; i++)
+                    putchar_raw(stream_output[slot][i]);
+                stdio_flush();
+            }
+            #endif
             send_head++;
         }
 
-        /* Check for incoming stop command (stdio is active, use normal input) */
+        /* Check for incoming stop command */
         #ifdef USE_CYGW_WIFI
-        if (fromWiFi)
         {
-            extern bool processWiFiInput(bool skipProcessing);
-            while (processWiFiInput(false))
-            {
-                if (!streaming)
-                    break;
-            }
+            extern void processInput(void);
+            processInput();
         }
-        else
-        #endif
+        #else
         {
             extern bool processUSBInput(bool skipProcessing);
             while (processUSBInput(false))
@@ -439,6 +434,7 @@ void RunStreamSendLoop(bool fromWiFi)
                 break;
             }
         }
+        #endif
 
         /* Overflow detection: DMA is about to overwrite unprocessed slots */
         if (dma_complete_count - send_head >= STREAM_SLOTS - 1)
@@ -454,8 +450,14 @@ void RunStreamSendLoop(bool fromWiFi)
     if (fromWiFi)
         wifi_transfer(eof, 2);
     else
+        usb_bulk_transfer_blocking(eof, 2);
+    #else
+    {
+        putchar_raw(0x00);
+        putchar_raw(0x00);
+        stdio_flush();
+    }
     #endif
-        stream_raw_write(eof, 2);
 
     /* Send termination status line (JS readLine() expects this after EOF) */
     if (overflow)

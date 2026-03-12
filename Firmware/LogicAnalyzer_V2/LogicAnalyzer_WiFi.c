@@ -14,10 +14,13 @@
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
 #include "hardware/flash.h"
+#include "hardware/sync.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
+#include "tusb.h"
 
 EVENT_FROM_FRONTEND frontendEventBuffer;
+EVENT_TO_USB usbSendEventBuffer;
 WIFI_STATE_MACHINE currentState = VALIDATE_SETTINGS;
 ip_addr_t address;
 struct tcp_pcb* serverPcb;
@@ -292,18 +295,135 @@ void frontendEvent(void* event)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/*  USB I/O functions — all run on Core 1                              */
+/* ------------------------------------------------------------------ */
+
+/* Track USB connection state for Core 0 notifications */
+static bool usb_was_connected = false;
+
+/* Read available USB data and push to Core 0 via usbToFrontend queue */
+static void usb_process_input(void)
+{
+    /* Check connection state changes */
+    bool connected = tud_cdc_connected();
+    if (connected && !usb_was_connected)
+    {
+        EVENT_FROM_USB evt;
+        evt.event = USB_CONNECTED;
+        evt.dataLength = 0;
+        event_push(&usbToFrontend, &evt);
+    }
+    else if (!connected && usb_was_connected)
+    {
+        EVENT_FROM_USB evt;
+        evt.event = USB_DISCONNECTED;
+        evt.dataLength = 0;
+        event_push(&usbToFrontend, &evt);
+    }
+    usb_was_connected = connected;
+
+    /* Read available bytes and push to Core 0 */
+    if (!tud_cdc_available())
+        return;
+
+    EVENT_FROM_USB evt;
+    evt.event = USB_DATA_RECEIVED;
+    evt.dataLength = (uint8_t)tud_cdc_read(evt.data, sizeof(evt.data));
+    if (evt.dataLength > 0)
+        event_push(&usbToFrontend, &evt);
+}
+
+/* Process queued USB send events from Core 0 */
+static void usbSendEvent(void* event)
+{
+    EVENT_TO_USB* evt = (EVENT_TO_USB*)event;
+    if (evt->event == USB_SEND_DATA)
+    {
+        uint32_t left = evt->dataLength;
+        uint32_t pos = 0;
+        while (left > 0)
+        {
+            uint32_t avail = tud_cdc_write_available();
+            if (avail > left) avail = left;
+            if (avail)
+            {
+                uint32_t written = tud_cdc_write(evt->data + pos, avail);
+                pos += written;
+                left -= written;
+            }
+            tud_task();
+            tud_cdc_write_flush();
+            if (!tud_cdc_connected())
+                break;
+        }
+    }
+}
+
+/* Efficient bulk write for large data transfers (capture data) */
+static void usb_cdc_write_bulk(const uint8_t* data, uint32_t len)
+{
+    uint32_t left = len;
+    uint32_t pos = 0;
+    while (left > 0)
+    {
+        uint32_t avail = tud_cdc_write_available();
+        if (avail > left) avail = left;
+        if (avail)
+        {
+            uint32_t written = tud_cdc_write(data + pos, avail);
+            pos += written;
+            left -= written;
+        }
+        tud_task();
+        tud_cdc_write_flush();
+        if (!tud_cdc_connected())
+            break;
+    }
+}
+
+/* Send pending bulk transfer (capture data) */
+static void usb_send_bulk_transfer(void)
+{
+    usb_cdc_write_bulk(usb_bulk.data, usb_bulk.length);
+    __dmb();
+    usb_bulk.pending = false;  /* prevent re-entry before Core 0 wakes */
+    __dmb();
+    usb_bulk.complete = true;
+}
+
 void runWiFiCore()
 {
+    /* WiFi event queue init */
     event_machine_init(&frontendToWifi, frontendEvent, sizeof(EVENT_FROM_FRONTEND), 8);
+
+    /* USB send event queue init */
+    event_machine_init(&frontendToUsb, usbSendEvent, sizeof(EVENT_TO_USB), 8);
+
     multicore_lockout_victim_init();
     cyw43_arch_init();
     cyw43_arch_enable_sta_mode();
+
     EVENT_FROM_WIFI evtRdy;
     evtRdy.event = CYW_READY;
     event_push(&wifiToFrontend, &evtRdy);
 
     while(true)
     {
+        /* USB hardware processing — always */
+        tud_task();
+
+        /* USB input: read bytes, push to Core 0 */
+        usb_process_input();
+
+        /* USB output: send queued responses */
+        event_process_queue(&frontendToUsb, &usbSendEventBuffer, 8);
+
+        /* USB bulk: send capture data if pending */
+        if (usb_bulk.pending)
+            usb_send_bulk_transfer();
+
+        /* WiFi processing */
         event_process_queue(&frontendToWifi, &frontendEventBuffer, 8);
         processWifiMachine();
         if(currentState > CONNECTING_AP)

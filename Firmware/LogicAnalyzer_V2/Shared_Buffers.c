@@ -8,4 +8,7 @@
     volatile WIFI_SETTINGS wifiSettings;
     EVENT_MACHINE wifiToFrontend;
     EVENT_MACHINE frontendToWifi;
+    EVENT_MACHINE usbToFrontend;
+    EVENT_MACHINE frontendToUsb;
+    USB_BULK_TRANSFER usb_bulk;
 #endif

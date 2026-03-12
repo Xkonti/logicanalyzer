@@ -19,6 +19,7 @@
 #include "pico/bootrom.h"
 #include "LogicAnalyzer_Stream.h"
 #include "pico/stdio_usb.h"
+#include "hardware/sync.h"
 
 #ifdef WS2812_LED
     #include "LogicAnalyzer_W2812.h"
@@ -34,12 +35,12 @@
         #include "Event_Machine.h"
         #include "Shared_Buffers.h"
         #include "LogicAnalyzer_WiFi.h"
-        #include "hardware/regs/usb.h"
-        #include "hardware/structs/usb.h"
 
-        bool usbDisabled = false;
         bool cywReady = false;
         bool skipWiFiData = false;
+        bool skipUsbData = false;
+        bool hadUsbData = false;
+        bool hadWiFiData = false;
         bool dataFromWiFi = false;
         EVENT_FROM_WIFI wifiEventBuffer;
         WIFI_SETTINGS_REQUEST* wReq;
@@ -168,46 +169,41 @@ void sendResponse(const char* response, bool toWiFi)
         event_push(&frontendToWifi, &evt);
     }
     else
-    #endif
-        printf(response);
-}
-
-/// @brief Transfer a buffer of data through USB using the TinyUSB CDC functions
-/// @param data Buffer of data to transfer
-/// @param len Length of the buffer
-void cdc_transfer(unsigned char* data, int len)
-{
-
-    int left = len;
-    int pos = 0;
-
-    while(left > 0)
     {
-        int avail = (int) tud_cdc_write_available();
-
-        if(avail > left)
-            avail = left;
-
-        if(avail)
-        {
-            int transferred = (int) tud_cdc_write(data + pos, avail);
-            tud_task();
-            tud_cdc_write_flush();
-            
-            pos += transferred;
-            left -= transferred;
-        }
-        else
-        {
-            tud_task();
-            tud_cdc_write_flush();
-            if (!tud_cdc_connected())
-                break;
-        }
+        EVENT_TO_USB evt;
+        evt.event = USB_SEND_DATA;
+        uint8_t len = strlen(response);
+        if (len > sizeof(evt.data))
+            len = sizeof(evt.data);
+        evt.dataLength = len;
+        memcpy(evt.data, response, len);
+        event_push(&frontendToUsb, &evt);
     }
+    #else
+        printf(response);
+    #endif
 }
 
 #ifdef USE_CYGW_WIFI
+
+/// @brief Transfer a buffer of data through USB via Core 1 bulk transfer mechanism.
+/// Core 0 sets up the descriptor, Core 1 sends the data. Blocks until complete.
+/// @param data Buffer of data to transfer
+/// @param len Length of the buffer
+void usb_bulk_transfer_blocking(unsigned char* data, int len)
+{
+    usb_bulk.data = data;
+    usb_bulk.length = len;
+    usb_bulk.complete = false;
+    __dmb();
+    usb_bulk.pending = true;
+
+    /* Wait for Core 1 to complete the transfer */
+    while (!usb_bulk.complete)
+        tight_loop_contents();
+    __dmb();  /* ensure Core 1's writes are visible before we set up next transfer */
+}
+
 /// @brief Transfer a buffer of data through WiFi
 /// @param data Buffer of data to transfer
 /// @param len Length of the buffer
@@ -494,55 +490,10 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
     //have any data, but the capture request has a CAPTURE_REQUEST struct as data.
 }
 
-/// @brief Receive and process USB data from the host application
-/// @param skipProcessing If true the received data is not processed (used for cleanup)
-/// @return True if anything is received, false if not
-bool processUSBInput(bool skipProcessing)
-{
-    //Try to get char
-    uint data = getchar_timeout_us(0);
-
-    //Timeout? Then leave
-    if(data == PICO_ERROR_TIMEOUT)
-        return false;
-
-    uint8_t filteredData = (uint8_t)data;
-
-    if(!skipProcessing)
-        processData(&filteredData, 1, false);
-
-    return true;
-
-}
-
-/// @brief Receive and process USB data directly via TinyUSB (bypasses stdio).
-/// Used when stdio_usb is disabled during streaming/capture transfer.
-/// @param skipProcessing If true the received data is not processed (used for cleanup)
-/// @return True if anything is received, false if not
-bool processUSBInputDirect(bool skipProcessing)
-{
-    if (!tud_cdc_available())
-        return false;
-
-    uint8_t filteredData;
-    uint32_t count = tud_cdc_read(&filteredData, 1);
-
-    if (count == 0)
-        return false;
-
-    if (!skipProcessing)
-        processData(&filteredData, 1, false);
-
-    return true;
-}
+/* processUSBInput and processUSBInputDirect removed —
+ * USB input now handled by Core 1 via usbToFrontend queue */
 
 #ifdef USE_CYGW_WIFI
-
-/// @brief Purges any pending data in the USB input
-void purgeUSBData()
-{
-    while(getchar_timeout_us(0) != PICO_ERROR_TIMEOUT);
-}
 
 /// @brief Send a string response with the power status
 /// @param status Status received from the WiFi core
@@ -569,17 +520,14 @@ void wifiEvent(void* event)
             cywReady = true;
             break;
         case CONNECTED:
-            usbDisabled = true;
-            //disableUSB();
+            dataFromWiFi = true;
             break;
         case DISCONNECTED:
-            usbDisabled = false;
-            purgeUSBData();
-            //enableUSB();
+            dataFromWiFi = false;
             break;
         case DATA_RECEIVED:
             if(skipWiFiData)
-                dataFromWiFi = true;
+                hadWiFiData = true;
             else
                 processData(wEvent->data, wEvent->dataLength, true);
             break;
@@ -594,23 +542,50 @@ void wifiEvent(void* event)
 }
 
 /// @brief Receives and processes input from the host application (when connected through WiFi)
-/// @param skipProcessing /// @param skipProcessing If true the received data is not processed (used for cleanup)
+/// @param skipProcessing If true the received data is not processed (used for cleanup)
 /// @return True if anything is received, false if not
 bool processWiFiInput(bool skipProcessing)
 {
-    bool res = event_has_events(&wifiToFrontend);
-
     if(skipProcessing)
     {
         skipWiFiData = true;
-        dataFromWiFi = false;
     }
 
     event_process_queue(&wifiToFrontend, &wifiEventBuffer, 8);
 
-    skipWiFiData = false;    
-    
-    return dataFromWiFi;
+    skipWiFiData = false;
+
+    return false;
+}
+
+/* USB event buffer for Core 0 processing */
+EVENT_FROM_USB usbInputEventBuffer;
+
+/* Track USB connection state from events */
+static bool usbConnected = false;
+
+/// @brief Callback for the USB input event queue
+/// @param event Received event
+void usbInputEvent(void* event)
+{
+    EVENT_FROM_USB* uEvent = (EVENT_FROM_USB*)event;
+
+    switch(uEvent->event)
+    {
+        case USB_CONNECTED:
+            usbConnected = true;
+            bufferPos = 0;
+            break;
+        case USB_DISCONNECTED:
+            usbConnected = false;
+            break;
+        case USB_DATA_RECEIVED:
+            if(!skipUsbData)
+                processData((uint8_t*)uEvent->data, uEvent->dataLength, false);
+            else
+                hadUsbData = true;
+            break;
+    }
 }
 
 #endif
@@ -618,17 +593,8 @@ bool processWiFiInput(bool skipProcessing)
 /// @brief Process input data from the host application if it is available
 void processInput()
 {
-    //Reset bufferPos on USB reconnection to prevent partial message corruption
-    static bool was_connected = false;
-    bool is_connected = tud_cdc_connected();
-    if(is_connected && !was_connected)
-        bufferPos = 0;
-    was_connected = is_connected;
-
     #ifdef USE_CYGW_WIFI
-        if(!usbDisabled)
-            processUSBInput(false);
-
+        event_process_queue(&usbToFrontend, &usbInputEventBuffer, 8);
         processWiFiInput(false);
     #else
         processUSBInput(false);
@@ -640,11 +606,17 @@ void processInput()
 bool processCancel()
 {
     #ifdef USE_CYGW_WIFI
-        if(!usbDisabled)
-            if(processUSBInput(true))
-                return true;
+        skipUsbData = true;
+        hadUsbData = false;
+        event_process_queue(&usbToFrontend, &usbInputEventBuffer, 8);
+        skipUsbData = false;
 
-        return processWiFiInput(true);
+        skipWiFiData = true;
+        hadWiFiData = false;
+        event_process_queue(&wifiToFrontend, &wifiEventBuffer, 8);
+        skipWiFiData = false;
+
+        return hadUsbData || hadWiFiData;
     #else
         return processUSBInput(true);
     #endif
@@ -690,14 +662,28 @@ int main()
     #if defined (BUILD_PICO_W) || defined (BUILD_PICO_2_W)
         cyw43_arch_init();
     #elif defined (BUILD_PICO_W_WIFI) || defined (BUILD_PICO_2_W_WIFI)
+        /* Init event queues for Core 0 side */
         event_machine_init(&wifiToFrontend, wifiEvent, sizeof(EVENT_FROM_WIFI), 8);
-            multicore_launch_core1(runWiFiCore);
-            while(!cywReady)
-                event_process_queue(&wifiToFrontend, &wifiEventBuffer, 1);
+        event_machine_init(&usbToFrontend, usbInputEvent, sizeof(EVENT_FROM_USB), 8);
+
+        /* Poll tud_task() on Core 0 until USB is enumerated.
+         * Core 1 will take over exclusive TinyUSB access after launch. */
+        {
+            absolute_time_t deadline = make_timeout_time_ms(2000);
+            while (!time_reached(deadline))
+                tud_task();
+        }
+
+        /* Launch Core 1 — it takes over all USB I/O */
+        multicore_launch_core1(runWiFiCore);
+        while(!cywReady)
+            event_process_queue(&wifiToFrontend, &wifiEventBuffer, 1);
     #endif
 
-    //A bit of delay, if the program tries to send data before Windows has identified the device it may crash
-    sleep_ms(1000);
+    /* For non-WiFi builds, wait for USB enumeration */
+    #if !defined(BUILD_PICO_W_WIFI) && !defined(BUILD_PICO_2_W_WIFI)
+        sleep_ms(1000);
+    #endif
 
     //Clear message buffer
     memset(messageBuffer, 0, sizeof(messageBuffer));
@@ -725,14 +711,9 @@ int main()
                 //Send the data to the host
                 uint8_t* lengthPointer = (uint8_t*)&length;
 
-                //Disable stdio_usb background task to prevent tud_task() reentrancy
-                stdio_usb_deinit();
-
-                //Send capture length
-
                 #ifdef USE_CYGW_WIFI
 
-                    if(usbDisabled)
+                    if(dataFromWiFi)
                     {
                         sleep_ms(2000);
                         wifi_transfer(lengthPointer, 4);
@@ -740,7 +721,7 @@ int main()
                     else
                     {
                         sleep_ms(100);
-                        cdc_transfer(lengthPointer, 4);
+                        usb_bulk_transfer_blocking(lengthPointer, 4);
                     }
 
                 #else
@@ -766,7 +747,7 @@ int main()
                 #ifdef USE_CYGW_WIFI
 
                     //Send the samples
-                    if(usbDisabled)
+                    if(dataFromWiFi)
                     {
                         if(first + length > CAPTURE_BUFFER_SIZE)
                         {
@@ -785,16 +766,16 @@ int main()
                     {
                         if(first + length > CAPTURE_BUFFER_SIZE)
                         {
-                            cdc_transfer(buffer + first, CAPTURE_BUFFER_SIZE - first);
-                            cdc_transfer(buffer, (first + length) - CAPTURE_BUFFER_SIZE);
+                            usb_bulk_transfer_blocking(buffer + first, CAPTURE_BUFFER_SIZE - first);
+                            usb_bulk_transfer_blocking(buffer, (first + length) - CAPTURE_BUFFER_SIZE);
                         }
                         else
-                            cdc_transfer(buffer + first, length);
+                            usb_bulk_transfer_blocking(buffer + first, length);
 
-                        cdc_transfer(&stampsLength, 1);
+                        usb_bulk_transfer_blocking(&stampsLength, 1);
 
                         if(stampsLength > 1)
-                            cdc_transfer((unsigned char*)timestamps, stampsLength * 4);
+                            usb_bulk_transfer_blocking((unsigned char*)timestamps, stampsLength * 4);
                     }
                 #else
 
@@ -813,9 +794,6 @@ int main()
 
                 #endif
 
-                //Re-enable stdio_usb background task
-                stdio_usb_init();
-
                 //Done!
                 capturing = false;
             }
@@ -832,6 +810,16 @@ int main()
                     capturing = false;
                     LED_ON();
                 }
+                #ifdef USE_CYGW_WIFI
+                //Detect USB disconnect during capture wait (via Core 1 events)
+                else if(!dataFromWiFi && !usbConnected)
+                {
+                    StopCapture();
+                    capturing = false;
+                    bufferPos = 0;
+                    LED_ON();
+                }
+                #else
                 //Detect USB disconnect during capture wait
                 else if(!tud_cdc_connected())
                 {
@@ -840,6 +828,7 @@ int main()
                     bufferPos = 0;
                     LED_ON();
                 }
+                #endif
                 else
                 {
                     LED_ON();
@@ -853,7 +842,7 @@ int main()
         else if(streaming_active)
         {
             #ifdef USE_CYGW_WIFI
-                RunStreamSendLoop(usbDisabled);
+                RunStreamSendLoop(dataFromWiFi);
             #else
                 RunStreamSendLoop(false);
             #endif
