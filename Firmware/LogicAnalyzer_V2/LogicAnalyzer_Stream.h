@@ -28,7 +28,7 @@ void StopStream(void);
 /*
  * Compression loop — runs on Core 0.
  * Reads DMA input ring, compresses chunks, writes to compressed ring.
- * Returns when streaming stops (via StopStream or overflow).
+ * Returns when streaming stops (via StopStream).
  * Sets compress_done flag before returning.
  */
 void RunCompressionLoop(void);

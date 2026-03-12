@@ -47,10 +47,15 @@ static volatile uint32_t transmit_count;            /* written by Core 1 transmi
 
 /* ---- Streaming state ---- */
 static volatile bool streaming;
-static volatile bool overflow;
 static volatile bool compress_done;          /* Core 0 sets when compression loop exits */
 volatile bool stream_transmit_active;        /* Core 0 sets true at start, Core 1 clears when done */
 static bool stream_from_wifi;                /* set once at StartStream, read by Core 1 */
+
+/* ---- Skip detection ---- */
+#define SKIP_REPORT_SIZE  32
+static uint16_t compress_skips[SKIP_REPORT_SIZE];   /* Core 0 writes, Core 1 reads+zeroes */
+static uint16_t transmit_skips[SKIP_REPORT_SIZE];   /* Core 1 only */
+static uint32_t next_skip_report_at;                /* transmit_count threshold for next report */
 
 /* ---- Capture parameters (set at stream start) ---- */
 static uint32_t stream_num_channels;     /* number of selected channels */
@@ -262,10 +267,14 @@ bool StartStream(const STREAM_REQUEST *req, bool fromWiFi)
     dma_complete_count      = 0;
     compress_complete_count = 0;
     transmit_count          = 0;
-    overflow                = false;
     compress_done           = false;
     streaming               = true;
     stream_from_wifi        = fromWiFi;
+
+    /* Reset skip tracking */
+    memset(compress_skips, 0, sizeof(compress_skips));
+    memset(transmit_skips, 0, sizeof(transmit_skips));
+    next_skip_report_at = SKIP_REPORT_SIZE;
 
     memset(stream_output_size, 0, sizeof(stream_output_size));
 
@@ -343,11 +352,16 @@ void RunCompressionLoop(void)
             continue;
         }
 
-        /* Overflow detection: DMA is about to overwrite uncompressed slots.
+        /* DMA overtake detection: DMA is about to overwrite uncompressed slots.
          * 2 slots are unsafe (chained DMA currently writing + next). */
         uint32_t pending = dma_complete_count - compress_read_count;
         if (pending >= STREAM_SLOTS - 2)
         {
+            /* Record how many DMA slots we're skipping */
+            uint32_t skipped = pending - 1;
+            uint32_t skip_idx = compress_complete_count % SKIP_REPORT_SIZE;
+            compress_skips[skip_idx] += (uint16_t)skipped;
+
             /* Skip ahead — can't compress slots that are being overwritten */
             compress_read_count = dma_complete_count - 1;
         }
@@ -372,13 +386,6 @@ void RunCompressionLoop(void)
         __dmb();
         compress_complete_count++;
         compress_read_count++;
-
-        /* Check if compressed ring is full (Core 1 can't keep up) */
-        if (compress_complete_count - transmit_count >= STREAM_SLOTS - 1)
-        {
-            overflow = true;
-            streaming = false;
-        }
     }
 
     stream_compress_deinit();
@@ -422,13 +429,76 @@ static void stream_send_eof(void)
         usb_cdc_write_bulk_ext(eof, 2);
 }
 
+/* Send a skip report frame.
+ * Wire format: [0xFFFF] [count: u8] [compress_skips: count×u16] [transmit_skips: count×u16]
+ * Only sends if there are non-zero entries. Zeroes reported entries afterward. */
+static void stream_send_skip_report(uint8_t count)
+{
+    /* Check if there are any actual skips to report */
+    bool has_skips = false;
+    for (uint8_t i = 0; i < count; i++)
+    {
+        if (compress_skips[i] || transmit_skips[i])
+        {
+            has_skips = true;
+            break;
+        }
+    }
+
+    if (has_skips)
+    {
+        uint8_t header[3] = { 0xFF, 0xFF, count };
+        uint32_t data_bytes = count * sizeof(uint16_t);
+
+        if (stream_from_wifi)
+        {
+            wifi_transfer(header, 3);
+            wifi_transfer((unsigned char*)compress_skips, data_bytes);
+            wifi_transfer((unsigned char*)transmit_skips, data_bytes);
+        }
+        else
+        {
+            usb_cdc_write_bulk_ext(header, 3);
+            usb_cdc_write_bulk_ext((const uint8_t*)compress_skips, data_bytes);
+            usb_cdc_write_bulk_ext((const uint8_t*)transmit_skips, data_bytes);
+        }
+    }
+
+    /* Zero reported entries for next window */
+    memset(compress_skips, 0, count * sizeof(uint16_t));
+    memset(transmit_skips, 0, count * sizeof(uint16_t));
+}
+
 void stream_process_transmit(void)
 {
     /* Process available compressed chunks, but limit per call to avoid
      * starving tud_task() and other Core 1 responsibilities */
     uint32_t chunks_sent = 0;
-    while (transmit_count < compress_complete_count && chunks_sent < 4)
+
+    while (chunks_sent < 4)
     {
+        /* Nothing available yet */
+        if (transmit_count >= compress_complete_count)
+            break;
+
+        /* Compressed ring overtake: Core 0 is lapping Core 1.
+         * Skip ahead to the most recent slot instead of reading stale/overwritten data. */
+        uint32_t pending = compress_complete_count - transmit_count;
+        if (pending >= STREAM_SLOTS - 1)
+        {
+            uint32_t skipped = pending - 1;
+            transmit_skips[transmit_count % SKIP_REPORT_SIZE] += (uint16_t)skipped;
+            transmit_count += skipped;
+
+            /* Check if we crossed a report boundary */
+            if (transmit_count >= next_skip_report_at)
+            {
+                stream_send_skip_report(SKIP_REPORT_SIZE);
+                next_skip_report_at = ((transmit_count / SKIP_REPORT_SIZE) + 1) * SKIP_REPORT_SIZE;
+            }
+            continue;
+        }
+
         __dmb();  /* acquire barrier — ensure we see Core 0's compressed data */
 
         uint32_t slot = transmit_count % STREAM_SLOTS;
@@ -440,6 +510,13 @@ void stream_process_transmit(void)
         stream_send_chunk(transmit_local_buf, size);
         transmit_count++;
         chunks_sent++;
+
+        /* Send skip report at window boundary */
+        if (transmit_count >= next_skip_report_at)
+        {
+            stream_send_skip_report(SKIP_REPORT_SIZE);
+            next_skip_report_at += SKIP_REPORT_SIZE;
+        }
     }
 
     /* Check if compression is done and all data has been transmitted */
@@ -447,14 +524,15 @@ void stream_process_transmit(void)
     {
         __dmb();
 
+        /* Send final partial skip report if any unreported entries */
+        uint8_t remaining = transmit_count % SKIP_REPORT_SIZE;
+        if (remaining > 0)
+            stream_send_skip_report(remaining);
+
         /* Send EOF marker */
         stream_send_eof();
 
-        /* Send termination status */
-        if (overflow)
-            sendResponse("STREAM_OVERFLOW\n", stream_from_wifi);
-        else
-            sendResponse("STREAM_DONE\n", stream_from_wifi);
+        sendResponse("STREAM_DONE\n", stream_from_wifi);
 
         /* Signal Core 0 that transmission is complete */
         stream_transmit_active = false;
