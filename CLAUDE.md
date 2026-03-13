@@ -1,6 +1,5 @@
 Quick project reference:
 
-- `.ai` directory - AI generated documentation and notes
 - `Firmware` - the firmware targeting Raspberry Pico 2W
 - `Software/Web` - the current web-based client application for controlling and viewing data from the hardware
 - `Software/LogicAnalyzer` - the old C# client (not supported anymore) acting as a reference to port features into the web client
