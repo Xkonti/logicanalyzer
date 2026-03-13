@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
