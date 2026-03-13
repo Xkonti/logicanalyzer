@@ -116,6 +116,60 @@ export function buildStreamRequest(config) {
   return new Uint8Array(buffer)
 }
 
+/**
+ * Writes a null-padded ASCII string into a Uint8Array at the given offset.
+ * @param {Uint8Array} bytes
+ * @param {number} offset
+ * @param {string} str
+ * @param {number} maxLen - field size (including null terminator space)
+ */
+function writeNullPaddedString(bytes, offset, str, maxLen) {
+  const len = Math.min(str.length, maxLen - 1)
+  for (let i = 0; i < len; i++) {
+    bytes[offset + i] = str.charCodeAt(i) & 0xff
+  }
+  // remaining bytes are already zero from ArrayBuffer initialization
+}
+
+/**
+ * Builds the WIFI_SETTINGS_REQUEST struct.
+ * Matches firmware LogicAnalyzer_Structs.h WIFI_SETTINGS_REQUEST
+ * and C# AnalyzerDriverBase.cs NetConfig with natural alignment.
+ *
+ * Layout (GCC ARM / C# Sequential, matching alignment conventions
+ * used in buildCaptureRequest and buildStreamRequest):
+ *   offset 0:   char[33]   apName
+ *   offset 33:  char[64]   passwd
+ *   offset 97:  char[16]   ipAddress
+ *   offset 113: 1 byte     alignment padding (uint16_t needs 2-byte alignment)
+ *   offset 114: uint16_t   port (LE)
+ *   offset 116: char[33]   hostname
+ *   offset 149: 1 byte     trailing struct alignment padding
+ *   Total: 150 bytes
+ *
+ * @param {Object} config
+ * @param {string} config.ssid - WiFi SSID (max 32 chars)
+ * @param {string} config.password - WiFi password (max 63 chars)
+ * @param {string} config.ipAddress - IPv4 address string (max 15 chars)
+ * @param {number} config.port - TCP port (1-65535)
+ * @param {string} [config.hostname=''] - Device hostname (max 32 chars)
+ * @returns {Uint8Array} exactly 150 bytes
+ */
+export function buildNetworkConfigRequest({ ssid, password, ipAddress, port, hostname = '' }) {
+  const buffer = new ArrayBuffer(150)
+  const view = new DataView(buffer)
+  const bytes = new Uint8Array(buffer)
+
+  writeNullPaddedString(bytes, 0, ssid, 33)
+  writeNullPaddedString(bytes, 33, password, 64)
+  writeNullPaddedString(bytes, 97, ipAddress, 16)
+  // offset 113: alignment padding (already zero)
+  view.setUint16(114, port, true) // little-endian
+  writeNullPaddedString(bytes, 116, hostname, 33)
+
+  return new Uint8Array(buffer)
+}
+
 export function buildCaptureRequest(session) {
   const buffer = new ArrayBuffer(56)
   const view = new DataView(buffer)

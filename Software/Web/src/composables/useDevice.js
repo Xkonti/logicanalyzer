@@ -46,6 +46,10 @@ export function useDevice() {
     return await store.enterBootloader()
   }
 
+  async function sendNetworkConfig(config) {
+    return await store.sendNetworkConfig(config)
+  }
+
   return reactive({
     isWebSerialAvailable,
     isConnected,
@@ -63,5 +67,6 @@ export function useDevice() {
     blinkLed,
     stopBlinkLed,
     enterBootloader,
+    sendNetworkConfig,
   })
 }

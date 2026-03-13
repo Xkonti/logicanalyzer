@@ -10,6 +10,7 @@ import {
   CAPTURE_MODE_16CH,
   CAPTURE_MODE_24CH,
   CMD_DEVICE_INIT,
+  CMD_NETWORK_CONFIG,
   CMD_BLINK_LED_ON,
   CMD_BLINK_LED_OFF,
   CMD_ENTER_BOOTLOADER,
@@ -707,6 +708,30 @@ describe('AnalyzerDriver', () => {
 
       expect(result.started).toBe(false)
       expect(result.error).toBe('Device error: STREAM_ERROR')
+    })
+  })
+
+  describe('sendNetworkConfig', () => {
+    const netConfig = {
+      ssid: 'TestNetwork',
+      password: 'pass123',
+      ipAddress: '192.168.4.1',
+      port: 4045,
+      hostname: 'analyzer',
+    }
+
+    it('sends CMD_NETWORK_CONFIG and returns true on SETTINGS_SAVED', async () => {
+      const { driver, transport } = await makeConnectedDriver({ lines: ['SETTINGS_SAVED'] })
+      const result = await driver.sendNetworkConfig(netConfig)
+      expect(result).toBe(true)
+      const pkt = transport.writtenData[1]
+      expect(pkt[2]).toBe(CMD_NETWORK_CONFIG)
+    })
+
+    it('returns false on unexpected response', async () => {
+      const { driver } = await makeConnectedDriver({ lines: ['SOME_ERROR'] })
+      const result = await driver.sendNetworkConfig(netConfig)
+      expect(result).toBe(false)
     })
   })
 
