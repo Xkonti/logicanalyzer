@@ -103,6 +103,12 @@ export function useWaveformInput(canvasRef, rendererRef) {
     renderer.setCursorX(snappedX)
   }
 
+  function handleScroll({ delta }) {
+    if (stream.streaming) stream.following = false
+    const amount = Math.round(delta * viewport.visibleSamples)
+    viewport.scrollBy(amount)
+  }
+
   function handleCursorLeave() {
     cursor.clearCursor()
     const renderer = rendererRef.value
@@ -118,6 +124,7 @@ export function useWaveformInput(canvasRef, rendererRef) {
     manager.bind(window, 'window')
 
     manager.on('zoom', handleZoom)
+    manager.on('scroll', handleScroll)
     manager.on('cursor-move', handleCursorMove)
     manager.on('cursor-leave', handleCursorLeave)
   })

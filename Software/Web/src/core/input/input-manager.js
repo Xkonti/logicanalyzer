@@ -96,6 +96,66 @@ export const BINDINGS = [
     payload: () => ({ delta: -1 }),
     preventDefault: true,
   },
+
+  // Ctrl+ArrowLeft → scroll left 100% (previous page)
+  {
+    event: 'keydown',
+    scope: 'window',
+    match: (e) => e.key === 'ArrowLeft' && (e.ctrlKey || e.metaKey) && !isTyping(e),
+    action: 'scroll',
+    payload: () => ({ delta: -1.0 }),
+    preventDefault: true,
+  },
+
+  // Ctrl+ArrowRight → scroll right 100% (next page)
+  {
+    event: 'keydown',
+    scope: 'window',
+    match: (e) => e.key === 'ArrowRight' && (e.ctrlKey || e.metaKey) && !isTyping(e),
+    action: 'scroll',
+    payload: () => ({ delta: 1.0 }),
+    preventDefault: true,
+  },
+
+  // Shift+ArrowLeft → scroll left 20%
+  {
+    event: 'keydown',
+    scope: 'window',
+    match: (e) => e.key === 'ArrowLeft' && e.shiftKey && !e.ctrlKey && !e.metaKey && !isTyping(e),
+    action: 'scroll',
+    payload: () => ({ delta: -0.2 }),
+    preventDefault: true,
+  },
+
+  // Shift+ArrowRight → scroll right 20%
+  {
+    event: 'keydown',
+    scope: 'window',
+    match: (e) => e.key === 'ArrowRight' && e.shiftKey && !e.ctrlKey && !e.metaKey && !isTyping(e),
+    action: 'scroll',
+    payload: () => ({ delta: 0.2 }),
+    preventDefault: true,
+  },
+
+  // ArrowLeft → scroll left 5%
+  {
+    event: 'keydown',
+    scope: 'window',
+    match: (e) => e.key === 'ArrowLeft' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !isTyping(e),
+    action: 'scroll',
+    payload: () => ({ delta: -0.05 }),
+    preventDefault: true,
+  },
+
+  // ArrowRight → scroll right 5%
+  {
+    event: 'keydown',
+    scope: 'window',
+    match: (e) => e.key === 'ArrowRight' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !isTyping(e),
+    action: 'scroll',
+    payload: () => ({ delta: 0.05 }),
+    preventDefault: true,
+  },
 ]
 
 export class InputManager {

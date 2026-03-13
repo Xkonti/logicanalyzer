@@ -239,6 +239,87 @@ describe('InputManager', () => {
 
       expect(handler).not.toHaveBeenCalled()
     })
+
+    // ── Arrow key scroll bindings ───────────────────────────────────────
+
+    it('dispatches scroll on ArrowLeft', () => {
+      const handler = vi.fn()
+      mgr.on('scroll', handler)
+      mgr.bind(win, 'window')
+
+      const event = createKeyEvent('ArrowLeft', { shiftKey: false, ctrlKey: false, metaKey: false })
+      win._fire('keydown', event)
+
+      expect(handler).toHaveBeenCalledWith({ delta: -0.05 })
+      expect(event.preventDefault).toHaveBeenCalled()
+    })
+
+    it('dispatches scroll on ArrowRight', () => {
+      const handler = vi.fn()
+      mgr.on('scroll', handler)
+      mgr.bind(win, 'window')
+
+      const event = createKeyEvent('ArrowRight', { shiftKey: false, ctrlKey: false, metaKey: false })
+      win._fire('keydown', event)
+
+      expect(handler).toHaveBeenCalledWith({ delta: 0.05 })
+      expect(event.preventDefault).toHaveBeenCalled()
+    })
+
+    it('dispatches scroll on Shift+ArrowLeft (20%)', () => {
+      const handler = vi.fn()
+      mgr.on('scroll', handler)
+      mgr.bind(win, 'window')
+
+      const event = createKeyEvent('ArrowLeft', { shiftKey: true, ctrlKey: false, metaKey: false })
+      win._fire('keydown', event)
+
+      expect(handler).toHaveBeenCalledWith({ delta: -0.2 })
+    })
+
+    it('dispatches scroll on Shift+ArrowRight (20%)', () => {
+      const handler = vi.fn()
+      mgr.on('scroll', handler)
+      mgr.bind(win, 'window')
+
+      const event = createKeyEvent('ArrowRight', { shiftKey: true, ctrlKey: false, metaKey: false })
+      win._fire('keydown', event)
+
+      expect(handler).toHaveBeenCalledWith({ delta: 0.2 })
+    })
+
+    it('dispatches scroll on Ctrl+ArrowLeft (100%)', () => {
+      const handler = vi.fn()
+      mgr.on('scroll', handler)
+      mgr.bind(win, 'window')
+
+      const event = createKeyEvent('ArrowLeft', { ctrlKey: true, shiftKey: false, metaKey: false })
+      win._fire('keydown', event)
+
+      expect(handler).toHaveBeenCalledWith({ delta: -1.0 })
+    })
+
+    it('dispatches scroll on Ctrl+ArrowRight (100%)', () => {
+      const handler = vi.fn()
+      mgr.on('scroll', handler)
+      mgr.bind(win, 'window')
+
+      const event = createKeyEvent('ArrowRight', { ctrlKey: true, shiftKey: false, metaKey: false })
+      win._fire('keydown', event)
+
+      expect(handler).toHaveBeenCalledWith({ delta: 1.0 })
+    })
+
+    it('does NOT dispatch arrow scroll when typing in an input', () => {
+      const handler = vi.fn()
+      mgr.on('scroll', handler)
+      mgr.bind(win, 'window')
+
+      const event = createKeyEvent('ArrowLeft', { target: { tagName: 'INPUT' }, shiftKey: false, ctrlKey: false, metaKey: false })
+      win._fire('keydown', event)
+
+      expect(handler).not.toHaveBeenCalled()
+    })
   })
 
   describe('first match wins', () => {
