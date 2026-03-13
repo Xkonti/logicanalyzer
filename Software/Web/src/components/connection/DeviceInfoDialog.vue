@@ -132,7 +132,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { useDevice } from 'src/composables/useDevice.js'
 
 defineProps({
@@ -218,6 +218,21 @@ const formValid = computed(() => {
 
 const saving = ref(false)
 const saveResult = ref(null)
+
+// Reset form and status when a new device connects
+watch(
+  () => device.isConnected,
+  (connected) => {
+    if (connected) {
+      form.ssid = ''
+      form.password = ''
+      form.ipAddress = '192.168.4.1'
+      form.port = 4045
+      form.hostname = ''
+      saveResult.value = null
+    }
+  },
+)
 
 async function onSave() {
   saving.value = true
