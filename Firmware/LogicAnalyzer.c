@@ -7,7 +7,6 @@
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 #include "hardware/flash.h"
-#include "hardware/vreg.h"
 #include "pico/multicore.h"
 #include "LogicAnalyzer.pio.h"
 #include "LogicAnalyzer_Structs.h"
@@ -19,10 +18,6 @@
 #include "pico/bootrom.h"
 #include "LogicAnalyzer_Stream.h"
 #include "hardware/sync.h"
-
-#ifdef WS2812_LED
-    #include "LogicAnalyzer_W2812.h"
-#endif
 
 
 #include "pico/cyw43_arch.h"
@@ -41,38 +36,19 @@ WIFI_SETTINGS_REQUEST* wReq;
 
 #define MULTICORE_LOCKOUT_TIMEOUT (uint64_t)10 * 365 * 24 * 60 * 60 * 1000 * 1000
 
-#if defined (GPIO_LED)
-    #define INIT_LED() {\
-                            gpio_init(LED_IO); \
-                            gpio_set_dir(LED_IO, GPIO_OUT); \
-                        }
-    #define LED_ON() gpio_put(LED_IO, 1)
-    #define LED_OFF() gpio_put(LED_IO, 0)
-#elif defined (CYGW_LED)
+#define INIT_LED() { }
 
-    #define INIT_LED() { }
+#define LED_ON() {\
+EVENT_FROM_FRONTEND lonEvt;\
+lonEvt.event = LED_ON;\
+event_push(&frontendToWifi, &lonEvt);\
+}
 
-    #define LED_ON() {\
-    EVENT_FROM_FRONTEND lonEvt;\
-    lonEvt.event = LED_ON;\
-    event_push(&frontendToWifi, &lonEvt);\
-    }
-
-    #define LED_OFF() {\
-    EVENT_FROM_FRONTEND loffEvt;\
-    loffEvt.event = LED_OFF;\
-    event_push(&frontendToWifi, &loffEvt);\
-    }
-
-#elif defined (WS2812_LED)
-    #define INIT_LED() init_rgb()
-    #define LED_ON() send_rgb(0,32,0)
-    #define LED_OFF() send_rgb(0,0,32)
-#elif defined (NO_LED)
-    #define INIT_LED() { }
-    #define LED_ON() { }
-    #define LED_OFF() { }
-#endif
+#define LED_OFF() {\
+EVENT_FROM_FRONTEND loffEvt;\
+loffEvt.event = LED_OFF;\
+event_push(&frontendToWifi, &loffEvt);\
+}
 
 //Buffer used to store received data (160 bytes to fit WIFI_SETTINGS_REQUEST = 148 + framing)
 uint8_t messageBuffer[160];
@@ -282,30 +258,14 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                         bool started = false;
 
-                        #ifdef SUPPORTS_COMPLEX_TRIGGER
-
-                            if(req->triggerType == 1) //Start complex trigger capture
-                                started = StartCaptureComplex(req->frequency, req->preSamples, req->postSamples, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->count, req->triggerValue, req->captureMode);
-                            else if(req->triggerType == 2) //start fast trigger capture
-                                started = StartCaptureFast(req->frequency, req->preSamples, req->postSamples, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->count, req->triggerValue, req->captureMode);
-                            else if(req->triggerType == 3)
-                                started = StartCaptureBlast(req->frequency, req->postSamples, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->inverted, req->captureMode);
-                            else //Start simple trigger capture
-                                started = StartCaptureSimple(req->frequency, req->preSamples, req->postSamples, req->loopCount, req->measure, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->inverted, req->captureMode);
-                        
-                        #else
-
-                            if(req->triggerType == 1 || req->triggerType == 2)
-                            {
-                                sendResponse("CAPTURE_ERROR\n", fromWiFi);
-                                break;
-                            }
-                            else if(req->triggerType == 3)
-                                started = StartCaptureBlast(req->frequency, req->postSamples, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->inverted, req->captureMode);
-                            else //Start simple trigger capture
-                                started = StartCaptureSimple(req->frequency, req->preSamples, req->postSamples, req->loopCount, req->measure, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->inverted, req->captureMode);
-                        
-                        #endif
+                        if(req->triggerType == 1)
+                            started = StartCaptureComplex(req->frequency, req->preSamples, req->postSamples, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->count, req->triggerValue, req->captureMode);
+                        else if(req->triggerType == 2)
+                            started = StartCaptureFast(req->frequency, req->preSamples, req->postSamples, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->count, req->triggerValue, req->captureMode);
+                        else if(req->triggerType == 3)
+                            started = StartCaptureBlast(req->frequency, req->postSamples, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->inverted, req->captureMode);
+                        else
+                            started = StartCaptureSimple(req->frequency, req->preSamples, req->postSamples, req->loopCount, req->measure, (uint8_t*)&req->channels, req->channelCount, req->trigger, req->inverted, req->captureMode);
 
                         if(started) //If started successfully inform to the host
                         {
@@ -573,20 +533,7 @@ bool processCancel()
 /// @return Exit code
 int main()
 {
-    #if defined (TURBO_MODE)
-
-        vreg_disable_voltage_limit();
-        vreg_set_voltage(VREG_VOLTAGE_1_30);
-        sleep_ms(100);
-        
-        //Overclock Powerrrr!
-        set_sys_clock_khz(400000, true);
-    
-    #else
-
-        set_sys_clock_khz(200000, true);
-
-    #endif
+    set_sys_clock_khz(200000, true);
 
     //Enable systick using CPU clock
     systick_hw->csr = 0x05;
@@ -734,9 +681,7 @@ int main()
                 else
                 {
                     LED_ON();
-                    #ifdef SUPPORTS_COMPLEX_TRIGGER
                     check_fast_interrupt();
-                    #endif
                     sleep_ms(1000);
                 }
             }

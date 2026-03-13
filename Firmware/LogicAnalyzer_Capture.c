@@ -13,9 +13,7 @@
 #include "hardware/structs/bus_ctrl.h"
 #include "LogicAnalyzer.pio.h"
 
-#if defined(CORE_TYPE_2)
 #include <RP2350.h>
-#endif
 
 //Static variables for the PIO programs
 static PIO capturePIO;
@@ -74,22 +72,20 @@ const uint8_t pinMap[] = PIN_MAP;
 //-----------------------------------------------------------------------------
 //--------------Complex trigger PIO program------------------------------------
 //-----------------------------------------------------------------------------
-#ifdef SUPPORTS_COMPLEX_TRIGGER
-
 #define COMPLEX_TRIGGER_wrap_target 0
 #define COMPLEX_TRIGGER_wrap 8
 
 uint16_t COMPLEX_TRIGGER_program_instructions[] = {
             //     .wrap_target
-    0x80a0, //  0: pull   block                      
-    0x6020, //  1: out    x, 32                      
-    0xe000, //  2: set    pins, 0                    
-    0xc007, //  3: irq    nowait 7                   
-    0xa0e0, //  4: mov    osr, pins                  
-    0x6044, //  5: out    y, 4                       
-    0x00a4, //  6: jmp    x != y, 4                  
-    0xe001, //  7: set    pins, 1                    
-    0x0008, //  8: jmp    8                          
+    0x80a0, //  0: pull   block
+    0x6020, //  1: out    x, 32
+    0xe000, //  2: set    pins, 0
+    0xc007, //  3: irq    nowait 7
+    0xa0e0, //  4: mov    osr, pins
+    0x6044, //  5: out    y, 4
+    0x00a4, //  6: jmp    x != y, 4
+    0xe001, //  7: set    pins, 1
+    0x0008, //  8: jmp    8
             //     .wrap
 };
 
@@ -104,7 +100,6 @@ static inline pio_sm_config COMPLEX_TRIGGER_program_get_default_config(uint offs
     sm_config_set_wrap(&c, offset + COMPLEX_TRIGGER_wrap_target, offset + COMPLEX_TRIGGER_wrap);
     return c;
 }
-#endif
 //-----------------------------------------------------------------------------
 //--------------Complex trigger PIO program END--------------------------------
 //-----------------------------------------------------------------------------
@@ -112,8 +107,6 @@ static inline pio_sm_config COMPLEX_TRIGGER_program_get_default_config(uint offs
 //-----------------------------------------------------------------------------
 //--------------Fast trigger PIO program---------------------------------------
 //-----------------------------------------------------------------------------
-#ifdef SUPPORTS_COMPLEX_TRIGGER
-
 #define FAST_TRIGGER_wrap_target 0
 #define FAST_TRIGGER_wrap 31
 
@@ -155,7 +148,6 @@ uint8_t create_fast_trigger_program(uint8_t pattern, uint8_t length)
 
     return first;
 }
-#endif
 //-----------------------------------------------------------------------------
 //--------------Fast trigger PIO program END-----------------------------------
 //-----------------------------------------------------------------------------
@@ -208,10 +200,8 @@ uint32_t find_capture_tail()
 //Disable the trigger GPIOs to avoid triggering again a chained device
 void disable_gpios()
 {
-    #ifdef SUPPORTS_COMPLEX_TRIGGER
     gpio_deinit(COMPLEX_TRIGGER_OUT_PIN);
-    gpio_deinit(COMPLEX_TRIGGER_IN_PIN); 
-    #endif
+    gpio_deinit(COMPLEX_TRIGGER_IN_PIN);
 
     for(uint8_t i = 0; i < lastCapturePinCount; i++)
         gpio_deinit(lastCapturePins[i]);
@@ -263,8 +253,6 @@ void abort_DMAs()
     dma_channel_unclaim(dmaPingPong0);
     dma_channel_unclaim(dmaPingPong1);
 }
-
-#ifdef SUPPORTS_COMPLEX_TRIGGER
 
 //Triggered when a fast capture ends
 void fast_capture_completed() 
@@ -337,8 +325,6 @@ void complex_capture_completed()
     captureFinished = true;
 }
 
-#endif
-
 
 //Triggered when a blast capture ends
 void blast_capture_completed()
@@ -395,11 +381,7 @@ void simple_capture_completed()
 
     if(timestampIndex)
     {
-#if defined(CORE_TYPE_2)
         EPPB->NMI_MASK0 = 0;
-#else
-        syscfg_hw->proc0_nmi_mask = 0;
-#endif
         exception_restore_handler(NMI_EXCEPTION, oldNMIHandler);
         systick_hw->csr = 0;
         exception_restore_handler(SYSTICK_EXCEPTION, oldSysTickHandler);
@@ -531,8 +513,6 @@ void StopCapture()
 
         uint32_t int_status = save_and_disable_interrupts();
 
-        #ifdef SUPPORTS_COMPLEX_TRIGGER
-
         if(lastCaptureType == CAPTURE_TYPE_SIMPLE)
             simple_capture_completed();
         else if(lastCaptureType == CAPTURE_TYPE_COMPLEX)
@@ -542,20 +522,9 @@ void StopCapture()
         else if(lastCaptureType == CAPTURE_TYPE_BLAST)
             blast_capture_completed();
 
-        #else
-
-        if(lastCaptureType == CAPTURE_TYPE_SIMPLE)
-            simple_capture_completed();
-        else if(lastCaptureType == CAPTURE_TYPE_BLAST)
-            blast_capture_completed();
-
-        #endif
-
         restore_interrupts(int_status);
     }
 }
-
-#ifdef SUPPORTS_COMPLEX_TRIGGER
 
 bool StartCaptureFast(uint32_t freq, uint32_t preLength, uint32_t postLength, const uint8_t* capturePins, uint8_t capturePinCount, uint8_t triggerPinBase, uint8_t triggerPinCount, uint16_t triggerValue, CHANNEL_MODE captureMode)
 {
@@ -891,8 +860,6 @@ bool StartCaptureComplex(uint32_t freq, uint32_t preLength, uint32_t postLength,
     return true;
 }
 
-#endif
-
 void __not_in_flash_func(sysTickRoll)()
 {
     systickLoops++;
@@ -1163,11 +1130,7 @@ bool StartCaptureSimple(uint32_t freq, uint32_t preLength, uint32_t postLength, 
 
         //syscfg_hw->proc0_nmi_mask = 1 << PIO0_IRQ_1;
         
-#if defined(CORE_TYPE_2)
         EPPB->NMI_MASK0 = 1 << PIO0_IRQ_1;
-#else
-        syscfg_hw->proc0_nmi_mask = 1 << PIO0_IRQ_1;
-#endif
 
         oldNMIHandler = exception_set_exclusive_handler(NMI_EXCEPTION, loopEndHandler);
 

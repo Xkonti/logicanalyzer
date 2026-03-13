@@ -367,8 +367,7 @@ FodyWeavers.xsd
 Releases/
 
 #Firmware build files
-Firmware/LogicAnalyzer/build/
-Firmware/LogicAnalyzer_V2/build/
+Firmware/build/
 
 #Python log
 PythonInitLog.txt
