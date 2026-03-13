@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool-subbuild/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

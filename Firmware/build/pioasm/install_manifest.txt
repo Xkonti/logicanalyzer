@@ -1,5 +1,0 @@
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm-install/pioasm/pioasm
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm-install/pioasm/pioasmTargets.cmake
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm-install/pioasm/pioasmTargets-release.cmake
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm-install/pioasm/pioasmConfig.cmake
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm-install/pioasm/pioasmConfigVersion.cmake

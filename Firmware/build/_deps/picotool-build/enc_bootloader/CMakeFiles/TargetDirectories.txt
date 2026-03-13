@@ -1,2 +1,0 @@
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool-build/enc_bootloader/CMakeFiles/edit_cache.dir
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool-build/enc_bootloader/CMakeFiles/rebuild_cache.dir

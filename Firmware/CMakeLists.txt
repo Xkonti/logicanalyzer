@@ -25,7 +25,7 @@ endif()
 # ====================================================================================
 
 set(PICO_BOARD pico2_w CACHE STRING "Board type")
-set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_BUILD_TYPE Release)
 
 
 # Pull in Raspberry Pi Pico SDK (must be before project)

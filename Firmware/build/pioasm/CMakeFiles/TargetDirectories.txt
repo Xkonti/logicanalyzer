@@ -1,7 +1,0 @@
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/CMakeFiles/pioasm.dir
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/CMakeFiles/edit_cache.dir
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/CMakeFiles/rebuild_cache.dir
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/CMakeFiles/list_install_components.dir
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/CMakeFiles/install.dir
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/CMakeFiles/install/local.dir
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/pioasm/CMakeFiles/install/strip.dir

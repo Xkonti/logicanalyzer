@@ -1,7 +1,0 @@
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool/picotool
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool/picotoolTargets.cmake
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool/picotoolTargets-release.cmake
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool/picotoolConfig.cmake
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool/picotoolConfigVersion.cmake
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool/enc_bootloader.elf
-/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/build/_deps/picotool/enc_bootloader_mbedtls.elf
