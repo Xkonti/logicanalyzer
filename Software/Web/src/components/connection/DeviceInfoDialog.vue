@@ -41,12 +41,16 @@
         <!-- Network Settings -->
         <q-separator dark class="q-mb-sm" />
         <div class="text-subtitle2 q-mb-xs">Network Settings</div>
+        <div v-if="isWiFiConnected" class="text-caption text-grey-6 q-mb-sm">
+          Connect via USB to change network settings.
+        </div>
         <div class="column q-gutter-y-xs">
           <q-input
             v-model="form.ssid"
             label="WiFi SSID"
             maxlength="32"
             :rules="[ssidRule]"
+            :disable="isWiFiConnected"
             hide-bottom-space
             dense
             outlined
@@ -58,6 +62,7 @@
             type="password"
             maxlength="63"
             :rules="[passwordRule]"
+            :disable="isWiFiConnected"
             hide-bottom-space
             dense
             outlined
@@ -73,6 +78,7 @@
                 label="IP Address"
                 maxlength="15"
                 :rules="[ipRule]"
+                :disable="isWiFiConnected"
                 hide-bottom-space
                 dense
                 outlined
@@ -85,6 +91,7 @@
                 label="Port"
                 type="number"
                 :rules="[portRule]"
+                :disable="isWiFiConnected"
                 hide-bottom-space
                 dense
                 outlined
@@ -97,6 +104,7 @@
             label="Hostname (optional)"
             maxlength="32"
             :rules="[hostnameRule]"
+            :disable="isWiFiConnected"
             hide-bottom-space
             dense
             outlined
@@ -108,7 +116,7 @@
             no-caps
             dense
             :loading="saving"
-            :disable="!formDirty || !formValid"
+            :disable="isWiFiConnected || !formDirty || !formValid"
             @click="onSave"
           />
           <q-banner
@@ -141,6 +149,7 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 const device = useDevice()
+const isWiFiConnected = computed(() => device.transportType === 'websocket')
 
 // --- Formatters ---
 

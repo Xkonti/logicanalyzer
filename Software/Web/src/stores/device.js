@@ -2,6 +2,7 @@ import { ref, shallowRef, computed, markRaw } from 'vue'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { AnalyzerDriver } from '../core/driver/analyzer.js'
 import { SerialTransport } from '../core/transport/serial.js'
+import { WebSocketTransport } from '../core/transport/websocket.js'
 
 export const useDeviceStore = defineStore('device', () => {
   const driver = shallowRef(null)
@@ -10,6 +11,7 @@ export const useDeviceStore = defineStore('device', () => {
   const streaming = ref(false)
   const deviceInfo = ref(null)
   const error = ref(null)
+  const transportType = ref(null)
 
   // Getters
   const version = computed(() => deviceInfo.value?.name ?? null)
@@ -26,7 +28,15 @@ export const useDeviceStore = defineStore('device', () => {
     }
 
     try {
-      const transport = markRaw(new SerialTransport(transportOptions))
+      const transport =
+        transportOptions.type === 'websocket'
+          ? markRaw(
+              new WebSocketTransport({
+                host: transportOptions.host,
+                port: transportOptions.port,
+              }),
+            )
+          : markRaw(new SerialTransport(transportOptions))
       await transport.connect()
 
       const drv = markRaw(new AnalyzerDriver())
@@ -34,10 +44,12 @@ export const useDeviceStore = defineStore('device', () => {
 
       driver.value = drv
       connected.value = true
+      transportType.value = transportOptions.type === 'websocket' ? 'websocket' : 'serial'
       deviceInfo.value = drv.getDeviceInfo()
     } catch (err) {
       driver.value = null
       connected.value = false
+      transportType.value = null
       deviceInfo.value = null
       error.value = err.message
     }
@@ -55,6 +67,7 @@ export const useDeviceStore = defineStore('device', () => {
     connected.value = false
     capturing.value = false
     streaming.value = false
+    transportType.value = null
     deviceInfo.value = null
     error.value = null
   }
@@ -110,6 +123,7 @@ export const useDeviceStore = defineStore('device', () => {
     connected,
     capturing,
     streaming,
+    transportType,
     deviceInfo,
     error,
     version,
