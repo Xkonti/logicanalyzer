@@ -287,7 +287,11 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                         WIFI_SETTINGS settings;
                         settings.checksum = 0;
                         memcpy(settings.apName, wReq->apName, 33);
-                        memcpy(settings.passwd, wReq->passwd, 64);
+                        // Empty password = keep existing (device doesn't report password over handshake)
+                        if (wReq->passwd[0] == '\0')
+                            memcpy(settings.passwd, wifiSettings.passwd, 64);
+                        else
+                            memcpy(settings.passwd, wReq->passwd, 64);
                         memcpy(settings.ipAddress, wReq->ipAddress, 16);
                         settings.port = wReq->port;
                         memcpy(settings.hostname, wReq->hostname, 33);

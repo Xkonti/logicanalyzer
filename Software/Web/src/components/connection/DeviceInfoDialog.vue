@@ -67,7 +67,7 @@
           />
           <q-input
             v-model="form.password"
-            label="WiFi Password"
+            label="WiFi Password (leave empty to keep existing)"
             type="password"
             maxlength="63"
             :rules="[passwordRule]"
@@ -209,8 +209,7 @@ const form = reactive({
 })
 
 const ssidRule = (val) => (val && val.length > 0 && val.length <= 32) || 'Required, max 32 chars'
-const passwordRule = (val) =>
-  (val && val.length > 0 && val.length <= 63) || 'Required, max 63 chars'
+const passwordRule = (val) => !val || val.length <= 63 || 'Max 63 chars'
 const ipRule = (val) => /^(\d{1,3}\.){3}\d{1,3}$/.test(val) || 'Must be a valid IPv4 address'
 const portRule = (val) =>
   (Number.isInteger(Number(val)) && val >= 1 && val <= 65535) || 'Must be 1-65535'
