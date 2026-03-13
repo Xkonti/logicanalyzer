@@ -42,7 +42,17 @@
         <q-separator dark class="q-mb-sm" />
         <div class="text-subtitle2 q-mb-none">Network Settings</div>
         <div class="text-caption text-grey-6 q-mb-xs">
-          Write-only — the device does not report its current configuration.
+          Password is write-only — the device does not report it.
+        </div>
+        <div class="row q-col-gutter-x-md q-mb-xs" v-if="info">
+          <div class="col-6">
+            <span class="text-grey-6 text-caption">Current SSID</span>
+            <div>{{ info.ssid || '(not set)' }}</div>
+          </div>
+          <div class="col-6">
+            <span class="text-grey-6 text-caption">Current Hostname</span>
+            <div>{{ info.hostname || '(not set)' }}</div>
+          </div>
         </div>
         <div class="column q-gutter-y-xs">
           <q-input
@@ -219,16 +229,17 @@ const formValid = computed(() => {
 const saving = ref(false)
 const saveResult = ref(null)
 
-// Reset form and status when a new device connects
+// Reset form and pre-fill with device values when a new device connects
 watch(
   () => device.isConnected,
   (connected) => {
     if (connected) {
-      form.ssid = ''
+      const di = device.deviceInfo
+      form.ssid = di?.ssid || ''
       form.password = ''
       form.ipAddress = '192.168.4.1'
       form.port = 4045
-      form.hostname = ''
+      form.hostname = di?.hostname || ''
       saveResult.value = null
     }
   },

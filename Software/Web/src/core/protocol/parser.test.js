@@ -62,6 +62,8 @@ describe('parseInitResponse', () => {
       'BLASTFREQ:200000000',
       'BUFFER:262144',
       'CHANNELS:24',
+      'SSID:MyNetwork',
+      'HOSTNAME:analyzer1',
     ]
   }
 
@@ -78,6 +80,8 @@ describe('parseInitResponse', () => {
       blastFrequency: 200000000,
       bufferSize: 262144,
       channelCount: 24,
+      ssid: 'MyNetwork',
+      hostname: 'analyzer1',
     })
   })
 
@@ -98,6 +102,8 @@ describe('parseInitResponse', () => {
       'BLASTFREQ:200000000',
       'BUFFER:262144',
       'CHANNELS:24',
+      'SSID:TestNet',
+      'HOSTNAME:host1',
     ]
     const transport = createMockTransport({ lines })
     await transport.connect()

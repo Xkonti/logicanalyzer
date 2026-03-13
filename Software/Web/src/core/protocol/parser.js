@@ -5,6 +5,8 @@ const FREQ_REGEX = /^FREQ:(\d+)$/
 const BLAST_FREQ_REGEX = /^BLASTFREQ:(\d+)$/
 const BUFFER_REGEX = /^BUFFER:(\d+)$/
 const CHANNELS_REGEX = /^CHANNELS:(\d+)$/
+const SSID_REGEX = /^SSID:(.*)$/
+const HOSTNAME_REGEX = /^HOSTNAME:(.*)$/
 
 /**
  * Validates a device version string in "LA-major.minor.patch" format.
@@ -38,6 +40,8 @@ export function validateVersion(versionString) {
  * @property {number} blastFrequency
  * @property {number} bufferSize
  * @property {number} channelCount
+ * @property {string} ssid - Configured WiFi SSID (empty if none)
+ * @property {string} hostname - Configured hostname (empty if none)
  */
 
 /**
@@ -50,6 +54,8 @@ export function validateVersion(versionString) {
  *   3. "BLASTFREQ:200000000"
  *   4. "BUFFER:262144"
  *   5. "CHANNELS:24"
+ *   6. "SSID:<name>" (may be empty)
+ *   7. "HOSTNAME:<name>" (may be empty)
  *
  * @param {import('../transport/types.js').ITransport} transport
  * @returns {Promise<DeviceInfo>}
@@ -95,6 +101,18 @@ export async function parseInitResponse(transport) {
     throw new Error(`Invalid channel count response: "${chanLine}"`)
   }
 
+  const ssidLine = await transport.readLine()
+  const ssidMatch = SSID_REGEX.exec(ssidLine)
+  if (!ssidMatch) {
+    throw new Error(`Invalid SSID response: "${ssidLine}"`)
+  }
+
+  const hostnameLine = await transport.readLine()
+  const hostnameMatch = HOSTNAME_REGEX.exec(hostnameLine)
+  if (!hostnameMatch) {
+    throw new Error(`Invalid hostname response: "${hostnameLine}"`)
+  }
+
   return {
     version: versionLine,
     majorVersion: ver.major,
@@ -103,6 +121,8 @@ export async function parseInitResponse(transport) {
     blastFrequency: parseInt(blastMatch[1], 10),
     bufferSize: parseInt(bufMatch[1], 10),
     channelCount: parseInt(chanMatch[1], 10),
+    ssid: ssidMatch[1],
+    hostname: hostnameMatch[1],
   }
 }
 

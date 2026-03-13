@@ -25,6 +25,8 @@ const INIT_LINES = [
   'BLASTFREQ:200000000',
   'BUFFER:262144',
   'CHANNELS:24',
+  'SSID:TestNetwork',
+  'HOSTNAME:myanalyzer',
 ]
 
 /**

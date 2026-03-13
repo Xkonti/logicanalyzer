@@ -243,6 +243,10 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                             sendResponse(msg, fromWiFi);
                             sprintf(msg, "CHANNELS:%d\n", MAX_CHANNELS);
                             sendResponse(msg, fromWiFi);
+                            sprintf(msg, "SSID:%s\n", wifiSettings.apName);
+                            sendResponse(msg, fromWiFi);
+                            sprintf(msg, "HOSTNAME:%s\n", wifiSettings.hostname);
+                            sendResponse(msg, fromWiFi);
                         }
                         break;
 

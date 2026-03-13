@@ -53,6 +53,8 @@ export class AnalyzerDriver {
   #blastFrequency = 0
   #bufferSize = 0
   #channelCount = 0
+  #ssid = ''
+  #hostname = ''
   #capturing = false
   #streaming = false
 
@@ -109,6 +111,8 @@ export class AnalyzerDriver {
     this.#blastFrequency = info.blastFrequency
     this.#bufferSize = info.bufferSize
     this.#channelCount = info.channelCount
+    this.#ssid = info.ssid
+    this.#hostname = info.hostname
   }
 
   async disconnect() {
@@ -164,6 +168,8 @@ export class AnalyzerDriver {
       channels: this.#channelCount,
       bufferSize: this.#bufferSize,
       modeLimits: [this.getLimits(range8), this.getLimits(range16), this.getLimits(range24)],
+      ssid: this.#ssid,
+      hostname: this.#hostname,
     }
   }
 
