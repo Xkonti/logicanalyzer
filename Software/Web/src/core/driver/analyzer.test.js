@@ -20,7 +20,7 @@ import {
 import { createChannel } from './types.js'
 
 const INIT_LINES = [
-  'ANALYZER_V6_5',
+  'LA-7.0.0',
   'FREQ:100000000',
   'BLASTFREQ:200000000',
   'BUFFER:262144',
@@ -45,9 +45,9 @@ describe('AnalyzerDriver', () => {
   describe('connect', () => {
     it('stores device info from init handshake', async () => {
       const { driver } = await makeConnectedDriver()
-      expect(driver.version).toBe('ANALYZER_V6_5')
-      expect(driver.majorVersion).toBe(6)
-      expect(driver.minorVersion).toBe(5)
+      expect(driver.version).toBe('LA-7.0.0')
+      expect(driver.majorVersion).toBe(7)
+      expect(driver.minorVersion).toBe(0)
       expect(driver.maxFrequency).toBe(100000000)
       expect(driver.blastFrequency).toBe(200000000)
       expect(driver.bufferSize).toBe(262144)
@@ -142,7 +142,7 @@ describe('AnalyzerDriver', () => {
     it('returns info with 3 modeLimits', async () => {
       const { driver } = await makeConnectedDriver()
       const info = driver.getDeviceInfo()
-      expect(info.name).toBe('ANALYZER_V6_5')
+      expect(info.name).toBe('LA-7.0.0')
       expect(info.maxFrequency).toBe(100000000)
       expect(info.blastFrequency).toBe(200000000)
       expect(info.channels).toBe(24)

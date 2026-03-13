@@ -231,7 +231,7 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                             sendResponse("ERR_UNKNOWN_MSG\n", fromWiFi);
                         else
                         {
-                            sendResponse("LOGIC_ANALYZER_"BOARD_NAME"_"FIRMWARE_VERSION"\n", fromWiFi);
+                            sendResponse("LA-"FIRMWARE_VERSION"\n", fromWiFi);
 
                             char msg[64];
                             

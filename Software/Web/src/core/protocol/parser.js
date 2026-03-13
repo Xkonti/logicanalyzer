@@ -1,30 +1,32 @@
-import { MIN_MAJOR_VERSION, MIN_MINOR_VERSION } from './commands.js'
+import { MIN_MAJOR_VERSION, MIN_MINOR_VERSION, MIN_PATCH_VERSION } from './commands.js'
 
-const VERSION_REGEX = /.*?V(\d+)_(\d+)$/
+const VERSION_REGEX = /^LA-(\d+)\.(\d+)\.(\d+)$/
 const FREQ_REGEX = /^FREQ:(\d+)$/
 const BLAST_FREQ_REGEX = /^BLASTFREQ:(\d+)$/
 const BUFFER_REGEX = /^BUFFER:(\d+)$/
 const CHANNELS_REGEX = /^CHANNELS:(\d+)$/
 
 /**
- * Validates a device version string.
- * Ports VersionValidator.cs — regex and min version check.
+ * Validates a device version string in "LA-major.minor.patch" format.
  *
  * @param {string} versionString
- * @returns {{ valid: boolean, major: number, minor: number }}
+ * @returns {{ valid: boolean, major: number, minor: number, patch: number }}
  */
 export function validateVersion(versionString) {
   const match = VERSION_REGEX.exec(versionString || '')
   if (!match) {
-    return { valid: false, major: 0, minor: 0 }
+    return { valid: false, major: 0, minor: 0, patch: 0 }
   }
 
   const major = parseInt(match[1], 10)
   const minor = parseInt(match[2], 10)
+  const patch = parseInt(match[3], 10)
   const valid =
-    major > MIN_MAJOR_VERSION || (major === MIN_MAJOR_VERSION && minor >= MIN_MINOR_VERSION)
+    major > MIN_MAJOR_VERSION ||
+    (major === MIN_MAJOR_VERSION &&
+      (minor > MIN_MINOR_VERSION || (minor === MIN_MINOR_VERSION && patch >= MIN_PATCH_VERSION)))
 
-  return { valid, major, minor }
+  return { valid, major, minor, patch }
 }
 
 /**
@@ -43,7 +45,7 @@ export function validateVersion(versionString) {
  * Ports LogicAnalyzerDriver.cs lines 133-189 (InitSerialPort handshake).
  *
  * Expected line order:
- *   1. Version string (e.g., "ANALYZER_V6_5")
+ *   1. Version string (e.g., "LA-7.0.0")
  *   2. "FREQ:100000000"
  *   3. "BLASTFREQ:200000000"
  *   4. "BUFFER:262144"
