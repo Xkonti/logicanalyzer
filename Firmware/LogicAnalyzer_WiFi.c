@@ -30,7 +30,6 @@ bool boot = false;
 static bool usb_was_connected = false;
 
 /* ---- WebSocket state ---- */
-bool ws_connection = false;
 static char ws_handshake_buf[512];
 static uint16_t ws_handshake_pos = 0;
 static WS_FRAME_PARSER ws_parser;
@@ -94,7 +93,6 @@ void killClient()
         tcp_close(clientPcb);
         clientPcb = NULL;
     }
-    ws_connection = false;
     ws_handshake_pos = 0;
     currentState = WAITING_TCP_CLIENT;
 }
@@ -103,41 +101,22 @@ void sendData(uint8_t* data, uint8_t len)
 {
     if (!clientPcb) return;
 
-    if (ws_connection)
+    uint8_t header[4];
+    uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, len);
+
+    while (clientPcb && tcp_sndbuf(clientPcb) < hlen + len)
     {
-        uint8_t header[4];
-        uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, len);
-
-        while (clientPcb && tcp_sndbuf(clientPcb) < hlen + len)
-        {
-            cyw43_arch_poll();
-            sleep_ms(1);
-        }
-
-        if (tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE) ||
-            tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY))
-        {
-            killClient();
-            EVENT_FROM_WIFI evt;
-            evt.event = DISCONNECTED;
-            event_push(&wifiToFrontend, &evt);
-        }
+        cyw43_arch_poll();
+        sleep_ms(1);
     }
-    else
-    {
-        while (clientPcb && tcp_sndbuf(clientPcb) < len)
-        {
-            cyw43_arch_poll();
-            sleep_ms(1);
-        }
 
-        if (tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY))
-        {
-            killClient();
-            EVENT_FROM_WIFI evt;
-            evt.event = DISCONNECTED;
-            event_push(&wifiToFrontend, &evt);
-        }
+    if (tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE) ||
+        tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY))
+    {
+        killClient();
+        EVENT_FROM_WIFI evt;
+        evt.event = DISCONNECTED;
+        event_push(&wifiToFrontend, &evt);
     }
 }
 
@@ -164,31 +143,6 @@ err_t serverReceiveData(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t e
         evt.event = DISCONNECTED;
         event_push(&wifiToFrontend, &evt);
         return ERR_ABRT;
-    }
-
-    /* ---- Protocol auto-detection ---- */
-    if (currentState == WS_DETECT_PROTOCOL)
-    {
-        uint8_t first_byte;
-        pbuf_copy_partial(p, &first_byte, 1, 0);
-
-        if (first_byte == 'G')  /* "GET " = WebSocket upgrade */
-        {
-            ws_connection = true;
-            currentState = WS_HANDSHAKE_PENDING;
-            /* Fall through to handshake accumulation below */
-        }
-        else  /* 0x55 or anything else = raw TCP */
-        {
-            ws_connection = false;
-            currentState = TCP_CLIENT_CONNECTED;
-
-            /* Push CONNECTED event */
-            evt.event = CONNECTED;
-            event_push(&wifiToFrontend, &evt);
-
-            /* Fall through to raw TCP data processing below */
-        }
     }
 
     /* ---- WebSocket handshake accumulation ---- */
@@ -237,7 +191,7 @@ err_t serverReceiveData(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t e
     }
 
     /* ---- WebSocket frame parsing ---- */
-    if (ws_connection && currentState == TCP_CLIENT_CONNECTED)
+    if (currentState == TCP_CLIENT_CONNECTED)
     {
         uint16_t offset = 0;
         uint16_t remaining = p->tot_len;
@@ -312,25 +266,9 @@ err_t serverReceiveData(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t e
         return ERR_OK;
     }
 
-    /* ---- Raw TCP data (legacy path) ---- */
-    {
-        uint16_t left = p->tot_len;
-        uint16_t pos = 0;
-
-        while (left)
-        {
-            uint8_t copy = left > 128 ? 128 : left;
-            evt.event = DATA_RECEIVED;
-            evt.dataLength = copy;
-            pbuf_copy_partial(p, evt.data, copy, pos);
-            event_push(&wifiToFrontend, &evt);
-            pos += copy;
-            left -= copy;
-        }
-
-        pbuf_free(p);
-        return ERR_OK;
-    }
+    /* Unexpected data in wrong state — discard */
+    pbuf_free(p);
+    return ERR_OK;
 }
 
 err_t acceptConnection(void *arg, struct tcp_pcb *client_pcb, err_t err)
@@ -343,10 +281,9 @@ err_t acceptConnection(void *arg, struct tcp_pcb *client_pcb, err_t err)
     tcp_recv(clientPcb, serverReceiveData);
     tcp_err(clientPcb, serverError);
 
-    /* Enter protocol detection — first bytes will determine WS vs raw TCP.
-     * CONNECTED event is deferred until protocol is determined. */
-    currentState = WS_DETECT_PROTOCOL;
-    ws_connection = false;
+    /* Begin WebSocket handshake. CONNECTED event is deferred until
+     * the upgrade handshake completes successfully. */
+    currentState = WS_HANDSHAKE_PENDING;
     ws_handshake_pos = 0;
     ws_parser_init(&ws_parser);
 
@@ -468,34 +405,19 @@ void wifi_send_direct(const uint8_t* data, uint16_t len)
 {
     if (!clientPcb) return;
 
-    if (ws_connection)
+    uint8_t header[4];
+    uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, len);
+
+    while (clientPcb && tcp_sndbuf(clientPcb) < (uint16_t)(hlen + len))
     {
-        uint8_t header[4];
-        uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, len);
-
-        while (clientPcb && tcp_sndbuf(clientPcb) < (uint16_t)(hlen + len))
-        {
-            cyw43_arch_poll();
-            sleep_ms(1);
-        }
-        if (!clientPcb) return;
-
-        tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-        tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY);
-        tcp_output(clientPcb);
+        cyw43_arch_poll();
+        sleep_ms(1);
     }
-    else
-    {
-        while (clientPcb && tcp_sndbuf(clientPcb) < len)
-        {
-            cyw43_arch_poll();
-            sleep_ms(1);
-        }
-        if (!clientPcb) return;
+    if (!clientPcb) return;
 
-        tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY);
-        tcp_output(clientPcb);
-    }
+    tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+    tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY);
+    tcp_output(clientPcb);
 }
 
 void wifi_send_direct_2(const uint8_t* d1, uint16_t l1,
@@ -504,37 +426,20 @@ void wifi_send_direct_2(const uint8_t* d1, uint16_t l1,
     if (!clientPcb) return;
 
     uint16_t total = l1 + l2;
+    uint8_t header[4];
+    uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, total);
 
-    if (ws_connection)
+    while (clientPcb && tcp_sndbuf(clientPcb) < (uint16_t)(hlen + total))
     {
-        uint8_t header[4];
-        uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, total);
-
-        while (clientPcb && tcp_sndbuf(clientPcb) < (uint16_t)(hlen + total))
-        {
-            cyw43_arch_poll();
-            sleep_ms(1);
-        }
-        if (!clientPcb) return;
-
-        tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-        tcp_write(clientPcb, d1, l1, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-        tcp_write(clientPcb, d2, l2, TCP_WRITE_FLAG_COPY);
-        tcp_output(clientPcb);
+        cyw43_arch_poll();
+        sleep_ms(1);
     }
-    else
-    {
-        while (clientPcb && tcp_sndbuf(clientPcb) < total)
-        {
-            cyw43_arch_poll();
-            sleep_ms(1);
-        }
-        if (!clientPcb) return;
+    if (!clientPcb) return;
 
-        tcp_write(clientPcb, d1, l1, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
-        tcp_write(clientPcb, d2, l2, TCP_WRITE_FLAG_COPY);
-        tcp_output(clientPcb);
-    }
+    tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+    tcp_write(clientPcb, d1, l1, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+    tcp_write(clientPcb, d2, l2, TCP_WRITE_FLAG_COPY);
+    tcp_output(clientPcb);
 }
 
 void frontendEvent(void* event)
@@ -585,7 +490,6 @@ static void usb_process_input(void)
 
         /* Disable WiFi — USB takes priority */
         if (currentState == TCP_CLIENT_CONNECTED ||
-            currentState == WS_DETECT_PROTOCOL ||
             currentState == WS_HANDSHAKE_PENDING)
         {
             EVENT_FROM_WIFI wifiEvt;
