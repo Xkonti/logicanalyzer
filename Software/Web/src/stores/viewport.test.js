@@ -134,26 +134,40 @@ describe('useViewportStore', () => {
       expect(viewport.visibleSamples).toBe(10) // stays at MIN
     })
 
-    it('maintains center on zoom', async () => {
+    it('maintains center on zoom (default fraction=0.5)', async () => {
       await setupCapture(1000)
       const viewport = useViewportStore()
-      // 23 is a zoom level (10, 15, 23, 34, ...)
       await viewport.setView(100, 23)
-      // Center is at 111, zoom in → 15
+      // Center is at 111, zoom in → 15, fraction=0.5
       await viewport.zoomIn()
       expect(viewport.visibleSamples).toBe(15)
-      // firstSample = 111 - floor(15/2) = 111 - 7 = 104
+      // firstSample = round(111 - 0.5 * 15) = round(103.5) = 104
       expect(viewport.firstSample).toBe(104)
     })
 
-    it('accepts custom center', async () => {
+    it('accepts anchor with fraction', async () => {
       await setupCapture(1000)
       const viewport = useViewportStore()
-      await viewport.setView(0, 23)
-      await viewport.zoomIn(5)
-      // New visible = 15, centered on 5 → first = 5 - 7 = clamped to 0
-      expect(viewport.firstSample).toBe(0)
-      expect(viewport.visibleSamples).toBe(15)
+      await viewport.setView(100, 80)
+      // Cursor at sample 120 (fraction = (120-100)/80 = 0.25 from left)
+      await viewport.zoomIn(120, 0.25)
+      // New visible = 53, newFirst = round(120 - 0.25 * 53) = round(106.75) = 107
+      expect(viewport.firstSample).toBe(107)
+      expect(viewport.visibleSamples).toBe(53)
+    })
+
+    it('preserves screen position of anchor sample', async () => {
+      await setupCapture(1000)
+      const viewport = useViewportStore()
+      await viewport.setView(200, 120)
+      // Cursor at pixel 75% from left → sample = 200 + 0.75 * 120 = 290
+      const anchor = 290
+      const fraction = 0.75
+      await viewport.zoomIn(anchor, fraction)
+      // Verify anchor is still near 75% in the new viewport
+      const newFraction =
+        (anchor - viewport.firstSample) / viewport.visibleSamples
+      expect(newFraction).toBeCloseTo(0.75, 1)
     })
 
     it('snaps down from a non-level value', async () => {
@@ -175,6 +189,19 @@ describe('useViewportStore', () => {
       await viewport.setView(0, 15)
       await viewport.zoomOut()
       expect(viewport.visibleSamples).toBe(23) // next level up
+    })
+
+    it('preserves screen position of anchor on zoom out', async () => {
+      await setupCapture(1000)
+      const viewport = useViewportStore()
+      await viewport.setView(200, 80)
+      // Cursor at 30% from left → sample 224
+      const anchor = 224
+      const fraction = 0.3
+      await viewport.zoomOut(anchor, fraction)
+      const newFraction =
+        (anchor - viewport.firstSample) / viewport.visibleSamples
+      expect(newFraction).toBeCloseTo(0.3, 1)
     })
 
     it('does not zoom beyond total samples', async () => {

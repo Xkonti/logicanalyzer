@@ -71,27 +71,35 @@ export const useViewportStore = defineStore('viewport', () => {
     visibleSamples.value = v
   }
 
-  async function zoomIn(center = null) {
+  /**
+   * Zoom in one level.
+   * @param {number|null} anchor - sample index to keep in place (null = viewport center)
+   * @param {number} fraction - screen fraction of anchor (0=left, 1=right, 0.5=center)
+   */
+  async function zoomIn(anchor = null, fraction = 0.5) {
     if (!canZoomIn.value) return
     const idx = findZoomIndex(visibleSamples.value)
-    // Step down one level, but only if we're actually at or above that level
     const newIdx = ZOOM_LEVELS[idx] >= visibleSamples.value ? Math.max(0, idx - 1) : idx
     const newVisible = ZOOM_LEVELS[newIdx]
-    const mid = center ?? firstSample.value + Math.floor(visibleSamples.value / 2)
-    const newFirst = mid - Math.floor(newVisible / 2)
+    const mid = anchor ?? firstSample.value + Math.floor(visibleSamples.value / 2)
+    const newFirst = Math.round(mid - fraction * newVisible)
     const { first: f, visible: v } = clamp(newFirst, newVisible)
     firstSample.value = f
     visibleSamples.value = v
   }
 
-  async function zoomOut(center = null) {
+  /**
+   * Zoom out one level.
+   * @param {number|null} anchor - sample index to keep in place (null = viewport center)
+   * @param {number} fraction - screen fraction of anchor (0=left, 1=right, 0.5=center)
+   */
+  async function zoomOut(anchor = null, fraction = 0.5) {
     if (!canZoomOut.value) return
     const idx = findZoomIndex(visibleSamples.value)
-    // Step up one level
     const newIdx = Math.min(ZOOM_LEVELS.length - 1, idx + 1)
     const newVisible = ZOOM_LEVELS[newIdx]
-    const mid = center ?? firstSample.value + Math.floor(visibleSamples.value / 2)
-    const newFirst = mid - Math.floor(newVisible / 2)
+    const mid = anchor ?? firstSample.value + Math.floor(visibleSamples.value / 2)
+    const newFirst = Math.round(mid - fraction * newVisible)
     const { first: f, visible: v } = clamp(newFirst, newVisible)
     firstSample.value = f
     visibleSamples.value = v
