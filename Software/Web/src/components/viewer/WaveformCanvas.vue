@@ -81,6 +81,7 @@ function scheduleRender() {
       renderer.value.resize()
       renderer.value.render()
       emit('channel-height-update', renderer.value.channelHeight)
+      viewport.setCanvasWidth(renderer.value._width)
     }
   })
 }
@@ -134,6 +135,7 @@ watchEffect(() => {
   renderer.value.resize()
   renderer.value.render()
   emit('channel-height-update', renderer.value.channelHeight)
+  viewport.setCanvasWidth(renderer.value._width)
 })
 
 defineExpose({ renderer })

@@ -38,6 +38,7 @@ function findZoomIndex(value) {
 export const useViewportStore = defineStore('viewport', () => {
   const firstSample = ref(0)
   const visibleSamples = ref(100)
+  const canvasWidth = ref(0)
 
   function getEffectiveTotalSamples() {
     const stream = useStreamStore()
@@ -133,6 +134,10 @@ export const useViewportStore = defineStore('viewport', () => {
     visibleSamples.value = total
   }
 
+  function setCanvasWidth(w) {
+    canvasWidth.value = w
+  }
+
   async function reset() {
     firstSample.value = 0
     visibleSamples.value = 100
@@ -142,6 +147,7 @@ export const useViewportStore = defineStore('viewport', () => {
     firstSample,
     visibleSamples,
     lastVisibleSample,
+    canvasWidth,
     canZoomIn,
     canZoomOut,
     totalSamples,
@@ -153,6 +159,7 @@ export const useViewportStore = defineStore('viewport', () => {
     scrollLeft,
     scrollRight,
     fitAll,
+    setCanvasWidth,
     reset,
   }
 })
