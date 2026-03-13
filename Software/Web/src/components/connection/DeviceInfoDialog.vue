@@ -1,5 +1,5 @@
 <template>
-  <q-dialog :model-value="modelValue" @update:model-value="$emit('update:modelValue', $event)">
+  <q-dialog :model-value="modelValue" @update:model-value="onDialogUpdate">
     <q-card style="min-width: 500px; max-width: 600px" class="bg-dark text-white">
       <q-card-section class="q-pb-none">
         <div class="text-h6">Device Info & Settings</div>
@@ -40,20 +40,7 @@
 
         <!-- Network Settings -->
         <q-separator dark class="q-mb-sm" />
-        <div class="text-subtitle2 q-mb-none">Network Settings</div>
-        <div class="text-caption text-grey-6 q-mb-xs">
-          Password is write-only — the device does not report it.
-        </div>
-        <div class="row q-col-gutter-x-md q-mb-xs" v-if="info">
-          <div class="col-6">
-            <span class="text-grey-6 text-caption">Current SSID</span>
-            <div>{{ info.ssid || '(not set)' }}</div>
-          </div>
-          <div class="col-6">
-            <span class="text-grey-6 text-caption">Current Hostname</span>
-            <div>{{ info.hostname || '(not set)' }}</div>
-          </div>
-        </div>
+        <div class="text-subtitle2 q-mb-xs">Network Settings</div>
         <div class="column q-gutter-y-xs">
           <q-input
             v-model="form.ssid"
@@ -76,6 +63,9 @@
             outlined
             dark
           />
+          <div class="text-caption text-grey-6 q-mt-none" style="margin-top: -4px">
+            Password is write-only — the device does not report it.
+          </div>
           <div class="row q-col-gutter-x-sm">
             <div class="col">
               <q-input
@@ -118,7 +108,7 @@
             no-caps
             dense
             :loading="saving"
-            :disable="!formValid"
+            :disable="!formDirty || !formValid"
             @click="onSave"
           />
           <q-banner
@@ -145,10 +135,10 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { useDevice } from 'src/composables/useDevice.js'
 
-defineProps({
+const props = defineProps({
   modelValue: Boolean,
 })
-defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue'])
 
 const device = useDevice()
 
@@ -208,6 +198,15 @@ const form = reactive({
   hostname: '',
 })
 
+/** Snapshot of form values at dialog open, used to detect changes */
+const initialForm = reactive({
+  ssid: '',
+  password: '',
+  ipAddress: '192.168.4.1',
+  port: 4045,
+  hostname: '',
+})
+
 const ssidRule = (val) => (val && val.length > 0 && val.length <= 32) || 'Required, max 32 chars'
 const passwordRule = (val) => !val || val.length <= 63 || 'Max 63 chars'
 const ipRule = (val) => /^(\d{1,3}\.){3}\d{1,3}$/.test(val) || 'Must be a valid IPv4 address'
@@ -225,24 +224,48 @@ const formValid = computed(() => {
   )
 })
 
+const formDirty = computed(() => {
+  return (
+    form.ssid !== initialForm.ssid ||
+    form.password !== initialForm.password ||
+    form.ipAddress !== initialForm.ipAddress ||
+    form.port !== initialForm.port ||
+    form.hostname !== initialForm.hostname
+  )
+})
+
 const saving = ref(false)
 const saveResult = ref(null)
 
-// Reset form and pre-fill with device values when a new device connects
+function resetForm() {
+  const di = device.deviceInfo
+  form.ssid = di?.ssid || ''
+  form.password = ''
+  form.ipAddress = '192.168.4.1'
+  form.port = 4045
+  form.hostname = di?.hostname || ''
+
+  initialForm.ssid = form.ssid
+  initialForm.password = form.password
+  initialForm.ipAddress = form.ipAddress
+  initialForm.port = form.port
+  initialForm.hostname = form.hostname
+
+  saving.value = false
+  saveResult.value = null
+}
+
+// Reset form every time the dialog opens
 watch(
-  () => device.isConnected,
-  (connected) => {
-    if (connected) {
-      const di = device.deviceInfo
-      form.ssid = di?.ssid || ''
-      form.password = ''
-      form.ipAddress = '192.168.4.1'
-      form.port = 4045
-      form.hostname = di?.hostname || ''
-      saveResult.value = null
-    }
+  () => props.modelValue,
+  (open) => {
+    if (open) resetForm()
   },
 )
+
+function onDialogUpdate(val) {
+  emit('update:modelValue', val)
+}
 
 async function onSave() {
   saving.value = true

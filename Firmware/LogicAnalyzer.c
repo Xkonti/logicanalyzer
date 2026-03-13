@@ -119,9 +119,12 @@ void sendResponse(const char* response, bool toWiFi)
     {
         EVENT_FROM_FRONTEND evt;
         evt.event = SEND_DATA;
-        evt.dataLength = strlen(response);
-        memset(evt.data, 0, 32);
-        memcpy(evt.data, response, evt.dataLength);
+        uint8_t len = strlen(response);
+        if (len > sizeof(evt.data))
+            len = sizeof(evt.data);
+        evt.dataLength = len;
+        memset(evt.data, 0, sizeof(evt.data));
+        memcpy(evt.data, response, len);
         event_push(&frontendToWifi, &evt);
     }
     else
@@ -243,14 +246,21 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                             sendResponse(msg, fromWiFi);
                             sprintf(msg, "CHANNELS:%d\n", MAX_CHANNELS);
                             sendResponse(msg, fromWiFi);
-                            // Copy with forced null-termination (flash may be 0xFF when uninitialized)
+                            // Copy with forced null-termination and sanitize
+                            // uninitialized flash (0xFF bytes)
                             char safeBuf[34];
                             memcpy(safeBuf, (const char*)wifiSettings.apName, 33);
                             safeBuf[33] = '\0';
+                            for (int i = 0; i < 33; i++) {
+                                if ((uint8_t)safeBuf[i] == 0xFF) { safeBuf[i] = '\0'; break; }
+                            }
                             sprintf(msg, "SSID:%s\n", safeBuf);
                             sendResponse(msg, fromWiFi);
                             memcpy(safeBuf, (const char*)wifiSettings.hostname, 33);
                             safeBuf[33] = '\0';
+                            for (int i = 0; i < 33; i++) {
+                                if ((uint8_t)safeBuf[i] == 0xFF) { safeBuf[i] = '\0'; break; }
+                            }
                             sprintf(msg, "HOSTNAME:%s\n", safeBuf);
                             sendResponse(msg, fromWiFi);
                         }
