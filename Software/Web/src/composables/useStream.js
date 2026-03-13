@@ -1,5 +1,5 @@
 import { computed, reactive } from 'vue'
-import { useStreamStore, STREAM_RATE_LIMITS } from '../stores/stream.js'
+import { useStreamStore } from '../stores/stream.js'
 import { useDeviceStore } from '../stores/device.js'
 import { useCaptureStore } from '../stores/capture.js'
 
@@ -30,6 +30,12 @@ export function useStream() {
   const hasStream = computed(() => stream.hasStream)
   const totalSamples = computed(() => stream.totalSamples)
 
+  // Skip stats
+  const totalDmaSkips = computed(() => stream.totalDmaSkips)
+  const totalTransmitSkips = computed(() => stream.totalTransmitSkips)
+  const dmaSkipsPerSec = computed(() => stream.dmaSkipsPerSec)
+  const transmitSkipsPerSec = computed(() => stream.transmitSkipsPerSec)
+
   // Data
   const streamChannels = computed(() => stream.streamChannels)
   const lossRegions = computed(() => stream.displayLossRegions)
@@ -38,16 +44,6 @@ export function useStream() {
   const canStartStream = computed(
     () => device.connected && !device.capturing && !device.streaming && capture.channels.length > 0,
   )
-
-  // Rate limit for current channel count
-  const recommendedFrequency = computed(() => {
-    const count = capture.channels.length
-    return STREAM_RATE_LIMITS[count] ?? STREAM_RATE_LIMITS[24]
-  })
-
-  const isOverRecommended = computed(() => {
-    return streamFrequency.value > recommendedFrequency.value
-  })
 
   // Actions
   async function startStream() {
@@ -84,14 +80,18 @@ export function useStream() {
     hasStream,
     totalSamples,
 
+    // Skip stats
+    totalDmaSkips,
+    totalTransmitSkips,
+    dmaSkipsPerSec,
+    transmitSkipsPerSec,
+
     // Data
     streamChannels,
     lossRegions,
 
     // Capability
     canStartStream,
-    recommendedFrequency,
-    isOverRecommended,
 
     // Actions
     startStream,

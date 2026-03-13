@@ -80,15 +80,23 @@
     </q-chip>
 
     <q-chip
-      v-if="stream.streamWarning"
+      v-if="stream.totalDmaSkips > 0"
       color="warning"
       text-color="white"
-      icon="warning"
+      icon="speed"
       dense
-      removable
-      @remove="stream.clearWarning()"
     >
-      {{ stream.streamWarning }}
+      DMA skips: {{ stream.totalDmaSkips }} ({{ stream.dmaSkipsPerSec }}/s)
+    </q-chip>
+
+    <q-chip
+      v-if="stream.totalTransmitSkips > 0"
+      color="warning"
+      text-color="white"
+      icon="usb"
+      dense
+    >
+      TX skips: {{ stream.totalTransmitSkips }} ({{ stream.transmitSkipsPerSec }}/s)
     </q-chip>
 
     <CaptureDialog v-model="showCaptureDialog" />

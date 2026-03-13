@@ -5,36 +5,6 @@ import { useDeviceStore } from './device.js'
 import { useViewportStore } from './viewport.js'
 import { createChannel } from '../core/driver/types.js'
 
-/**
- * Recommended max streaming frequency per channel count (90% of USB benchmark).
- */
-export const STREAM_RATE_LIMITS = {
-  1: 6310000,
-  2: 3630000,
-  3: 2410000,
-  4: 1820000,
-  5: 1450000,
-  6: 1210000,
-  7: 1040000,
-  8: 910000,
-  9: 806000,
-  10: 728000,
-  11: 661000,
-  12: 606000,
-  13: 559000,
-  14: 519000,
-  15: 484000,
-  16: 454000,
-  17: 427000,
-  18: 404000,
-  19: 382000,
-  20: 364000,
-  21: 346000,
-  22: 330000,
-  23: 316000,
-  24: 303000,
-}
-
 export const useStreamStore = defineStore('stream', () => {
   // Config (persisted)
   const streamFrequency = useLocalStorage('la-stream-frequency', 250000)
@@ -52,6 +22,9 @@ export const useStreamStore = defineStore('stream', () => {
   // Skip detection
   const totalDmaSkips = ref(0)
   const totalTransmitSkips = ref(0)
+  const dmaSkipsPerSec = ref(0)
+  const transmitSkipsPerSec = ref(0)
+  let streamStartedAt = 0
 
   // Loss region tracking (absolute sample coordinates)
   const lossRegions = shallowRef([]) // { absoluteFirst, absoluteLast }[]
@@ -144,11 +117,11 @@ export const useStreamStore = defineStore('stream', () => {
     totalDmaSkips.value += dmaSkips
     totalTransmitSkips.value += txSkips
 
-    const total = totalDmaSkips.value + totalTransmitSkips.value
-    streamWarning.value =
-      `Data loss detected: ${total} skipped chunks` +
-      ` (${totalDmaSkips.value} DMA, ${totalTransmitSkips.value} transmit)` +
-      ` — try lowering the sample rate`
+    const elapsed = (performance.now() - streamStartedAt) / 1000
+    if (elapsed > 0) {
+      dmaSkipsPerSec.value = Math.round(totalDmaSkips.value / elapsed)
+      transmitSkipsPerSec.value = Math.round(totalTransmitSkips.value / elapsed)
+    }
 
     // Mark samples received since the last report as a lossy region
     if (samplesSinceLastReport > 0) {
@@ -246,18 +219,16 @@ export const useStreamStore = defineStore('stream', () => {
     streamWarning.value = null
     totalDmaSkips.value = 0
     totalTransmitSkips.value = 0
+    dmaSkipsPerSec.value = 0
+    transmitSkipsPerSec.value = 0
     lossRegions.value = []
     displayOffset.value = 0
     absoluteSamplesReceived = 0
     samplesSinceLastReport = 0
+    streamStartedAt = performance.now()
 
     const channelNumbers = channelsToStream.map((ch) => ch.channelNumber)
     const freq = streamFrequency.value
-    const limit = STREAM_RATE_LIMITS[channelNumbers.length]
-
-    if (limit && freq > limit) {
-      streamWarning.value = `Frequency ${formatFreq(freq)} exceeds recommended ${formatFreq(limit)} for ${channelNumbers.length}ch — data dropouts may occur`
-    }
 
     // Create channel objects with empty sample buffers
     streamChannels.value = channelsToStream.map((ch) =>
@@ -319,10 +290,13 @@ export const useStreamStore = defineStore('stream', () => {
     lastFlushTime = 0
     totalDmaSkips.value = 0
     totalTransmitSkips.value = 0
+    dmaSkipsPerSec.value = 0
+    transmitSkipsPerSec.value = 0
     lossRegions.value = []
     displayOffset.value = 0
     absoluteSamplesReceived = 0
     samplesSinceLastReport = 0
+    streamStartedAt = 0
     const device = useDeviceStore()
     device.streaming = false
   }
@@ -341,18 +315,14 @@ export const useStreamStore = defineStore('stream', () => {
     totalSamples,
     totalDmaSkips,
     totalTransmitSkips,
+    dmaSkipsPerSec,
+    transmitSkipsPerSec,
     displayLossRegions,
     startStream,
     stopStream,
     clearStream,
   }
 })
-
-function formatFreq(hz) {
-  if (hz >= 1000000) return `${(hz / 1000000).toFixed(1)} MHz`
-  if (hz >= 1000) return `${(hz / 1000).toFixed(0)} kHz`
-  return `${hz} Hz`
-}
 
 if (import.meta.hot) {
   import.meta.hot.accept(acceptHMRUpdate(useStreamStore, import.meta.hot))

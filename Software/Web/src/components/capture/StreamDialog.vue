@@ -62,16 +62,6 @@
         <q-banner v-if="!hasChannels" dense class="bg-negative text-white q-mt-sm">
           No channels selected. Select at least one channel above.
         </q-banner>
-
-        <q-banner
-          v-if="hasChannels && isOverRecommended"
-          dense
-          class="bg-warning text-white q-mt-sm"
-          rounded
-        >
-          Frequency exceeds recommended {{ formatFreq(recommendedLimit) }}
-          for {{ channelConfig.selectedChannels.length }}ch — data dropouts may occur.
-        </q-banner>
       </q-card-section>
 
       <q-card-actions align="right">
@@ -94,7 +84,6 @@ import { ref, computed } from 'vue'
 import { useStream } from 'src/composables/useStream.js'
 import { useCapture } from 'src/composables/useCapture.js'
 import { useChannelConfigStore } from 'src/stores/channel-config.js'
-import { STREAM_RATE_LIMITS } from 'src/stores/stream.js'
 import ChannelSelector from 'src/components/shared/ChannelSelector.vue'
 
 const CHUNK_SIZES = [32, 64, 128, 256, 512, 1024]
@@ -143,26 +132,11 @@ const chunkSizeHint = computed(() => {
   return `~${fps} updates/sec (recommended: ${recommendedChunkSize.value} for ≥${TARGET_FPS} fps)`
 })
 
-const recommendedLimit = computed(() => {
-  const count = channelConfig.selectedChannels.length
-  return STREAM_RATE_LIMITS[count] ?? STREAM_RATE_LIMITS[24]
-})
-
-const isOverRecommended = computed(() => {
-  return localFrequency.value > recommendedLimit.value
-})
-
 const frequencyHint = computed(() => {
   const freq = localFrequency.value
   if (freq < 3000) return 'Minimum: 3,000 Hz (PIO hardware limit)'
-  return `Recommended max: ${formatFreq(recommendedLimit.value)} for ${channelConfig.selectedChannels.length}ch`
+  return ''
 })
-
-function formatFreq(hz) {
-  if (hz >= 1000000) return `${(hz / 1000000).toFixed(1)} MHz`
-  if (hz >= 1000) return `${(hz / 1000).toFixed(0)} kHz`
-  return `${hz} Hz`
-}
 
 function onStart() {
   stream.streamFrequency = localFrequency.value
