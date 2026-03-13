@@ -1,55 +1,68 @@
 import { describe, it, expect } from 'vitest'
 import { extractSamples, processBurstTimestamps } from './samples.js'
 
+/** Helper: extract samples and return as plain Uint8Array for assertion. */
+function extractAsArray(raw, channelIndex) {
+  return extractSamples(raw, channelIndex).toUint8Array()
+}
+
 describe('extractSamples', () => {
+  it('returns a SampleBuffer with get() and length', () => {
+    const raw = new Uint32Array([0b00000001, 0b00000000])
+    const buf = extractSamples(raw, 0)
+    expect(buf.length).toBe(2)
+    expect(buf.get(0)).toBe(1)
+    expect(buf.get(1)).toBe(0)
+  })
+
   it('extracts channel 0 from 8-bit samples', () => {
     // Bit 0: 1,0,1,0
     const raw = new Uint32Array([0b00000001, 0b00000000, 0b00000001, 0b00000000])
-    expect(extractSamples(raw, 0)).toEqual(new Uint8Array([1, 0, 1, 0]))
+    expect(extractAsArray(raw, 0)).toEqual(new Uint8Array([1, 0, 1, 0]))
   })
 
   it('extracts channel 3 from 8-bit samples', () => {
     // Bit 3 = 0x08: set in first and third
     const raw = new Uint32Array([0b00001000, 0b00000000, 0b00001000, 0b00000100])
-    expect(extractSamples(raw, 3)).toEqual(new Uint8Array([1, 0, 1, 0]))
+    expect(extractAsArray(raw, 3)).toEqual(new Uint8Array([1, 0, 1, 0]))
   })
 
   it('extracts channel 7', () => {
     const raw = new Uint32Array([0x80, 0x00, 0xff])
-    expect(extractSamples(raw, 7)).toEqual(new Uint8Array([1, 0, 1]))
+    expect(extractAsArray(raw, 7)).toEqual(new Uint8Array([1, 0, 1]))
   })
 
   it('extracts higher channel indices (channel 15)', () => {
     const raw = new Uint32Array([0x8000, 0x0000, 0xffff])
-    expect(extractSamples(raw, 15)).toEqual(new Uint8Array([1, 0, 1]))
+    expect(extractAsArray(raw, 15)).toEqual(new Uint8Array([1, 0, 1]))
   })
 
   it('extracts channel 23', () => {
     const raw = new Uint32Array([0x800000, 0x000000, 0xffffff])
-    expect(extractSamples(raw, 23)).toEqual(new Uint8Array([1, 0, 1]))
+    expect(extractAsArray(raw, 23)).toEqual(new Uint8Array([1, 0, 1]))
   })
 
   it('returns all zeros for all-zero input', () => {
     const raw = new Uint32Array([0, 0, 0, 0])
-    expect(extractSamples(raw, 0)).toEqual(new Uint8Array([0, 0, 0, 0]))
-    expect(extractSamples(raw, 5)).toEqual(new Uint8Array([0, 0, 0, 0]))
+    expect(extractAsArray(raw, 0)).toEqual(new Uint8Array([0, 0, 0, 0]))
+    expect(extractAsArray(raw, 5)).toEqual(new Uint8Array([0, 0, 0, 0]))
   })
 
   it('returns all ones for channel 0 when all-0xFF input', () => {
     const raw = new Uint32Array([0xff, 0xff, 0xff])
-    expect(extractSamples(raw, 0)).toEqual(new Uint8Array([1, 1, 1]))
+    expect(extractAsArray(raw, 0)).toEqual(new Uint8Array([1, 1, 1]))
   })
 
   it('extracts independent channels from same raw data', () => {
     // Only bit 0 set in all samples
     const raw = new Uint32Array([0x01, 0x01, 0x01])
-    expect(extractSamples(raw, 0)).toEqual(new Uint8Array([1, 1, 1]))
-    expect(extractSamples(raw, 1)).toEqual(new Uint8Array([0, 0, 0]))
+    expect(extractAsArray(raw, 0)).toEqual(new Uint8Array([1, 1, 1]))
+    expect(extractAsArray(raw, 1)).toEqual(new Uint8Array([0, 0, 0]))
   })
 
   it('handles empty input', () => {
     const raw = new Uint32Array(0)
-    expect(extractSamples(raw, 0)).toEqual(new Uint8Array(0))
+    expect(extractAsArray(raw, 0)).toEqual(new Uint8Array(0))
   })
 })
 

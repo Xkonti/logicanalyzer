@@ -15,6 +15,7 @@
  */
 
 import { getChannelColor, withAlpha, BG_CHANNEL_COLORS, COLORS } from './colors.js'
+import { SampleBuffer } from '../sample-buffer.js'
 
 /** Minimum height per channel in CSS pixels. */
 export const MIN_CHANNEL_HEIGHT = 30
@@ -286,9 +287,9 @@ export class WaveformRenderer {
       const color = getChannelColor(channel)
 
       if (samplesPerPixel <= 2) {
-        this._drawChannelDetailed(ctx, samples, yHi, yLo, width, color)
+        this._drawChannelDetailed(ctx, channel, yHi, yLo, width, color)
       } else {
-        this._drawChannelDecimated(ctx, samples, yHi, yLo, width, color, samplesPerPixel)
+        this._drawChannelDecimated(ctx, channel, yHi, yLo, width, color, samplesPerPixel)
       }
     }
   }
@@ -298,18 +299,22 @@ export class WaveformRenderer {
    * Used when zoomed in (<=2 samples per pixel).
    * Draws fill + signal line in two passes through the data.
    */
-  _drawChannelDetailed(ctx, samples, yHi, yLo, width, color) {
+  _drawChannelDetailed(ctx, channel, yHi, yLo, width, color) {
+    const samples = channel.samples
+    const isSampleBuffer = samples instanceof SampleBuffer
+    const totalLen = isSampleBuffer ? samples.length : samples.length
     const { firstSample, visibleSamples } = this
-    const lastSample = Math.min(firstSample + visibleSamples, samples.length)
-    if (firstSample >= samples.length) return
+    const lastSample = Math.min(firstSample + visibleSamples, totalLen)
+    if (firstSample >= totalLen) return
 
     const sampleWidth = width / visibleSamples
     const endX = (lastSample - firstSample) * sampleWidth
+    const getSample = isSampleBuffer ? (i) => samples.get(i) : (i) => samples[i]
 
     // Pass 1: fill — trace waveform then close along baseline
     ctx.fillStyle = withAlpha(color, FILL_ALPHA)
     ctx.beginPath()
-    this._traceWaveform(ctx, samples, firstSample, lastSample, sampleWidth, yHi, yLo)
+    this._traceWaveform(ctx, getSample, firstSample, lastSample, sampleWidth, yHi, yLo)
     ctx.lineTo(endX, yLo)
     ctx.lineTo(0, yLo)
     ctx.closePath()
@@ -319,7 +324,7 @@ export class WaveformRenderer {
     ctx.strokeStyle = color
     ctx.lineWidth = SIGNAL_LINE_WIDTH
     ctx.beginPath()
-    this._traceWaveform(ctx, samples, firstSample, lastSample, sampleWidth, yHi, yLo)
+    this._traceWaveform(ctx, getSample, firstSample, lastSample, sampleWidth, yHi, yLo)
     ctx.stroke()
   }
 
@@ -328,16 +333,24 @@ export class WaveformRenderer {
    * Uses RLE: only emits lineTo at transitions.
    * Draws slanted transitions so it's easy to see exactly between
    * which two samples a value change occurred.
+   *
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {function(number): number} getSample - function returning 0/1 at index
+   * @param {number} firstSample
+   * @param {number} lastSample
+   * @param {number} sampleWidth
+   * @param {number} yHi
+   * @param {number} yLo
    */
-  _traceWaveform(ctx, samples, firstSample, lastSample, sampleWidth, yHi, yLo) {
+  _traceWaveform(ctx, getSample, firstSample, lastSample, sampleWidth, yHi, yLo) {
     const slantHalf = Math.min(sampleWidth * 0.15, 4)
 
-    let currentValue = samples[firstSample]
+    let currentValue = getSample(firstSample)
     let currentY = currentValue ? yHi : yLo
     ctx.moveTo(0, currentY)
 
     for (let i = firstSample + 1; i < lastSample; i++) {
-      const val = samples[i]
+      const val = getSample(i)
       if (val !== currentValue) {
         const x = (i - firstSample) * sampleWidth
         ctx.lineTo(x - slantHalf, currentY)
@@ -354,10 +367,14 @@ export class WaveformRenderer {
    * Decimated rendering: per-pixel-column min/max summary.
    * Used when zoomed out (>2 samples per pixel).
    */
-  _drawChannelDecimated(ctx, samples, yHi, yLo, width, color, samplesPerPixel) {
+  _drawChannelDecimated(ctx, channel, yHi, yLo, width, color, samplesPerPixel) {
+    const samples = channel.samples
     const { firstSample } = this
     const pixelCount = Math.ceil(width)
-    const summary = computeColumnSummary(samples, firstSample, samplesPerPixel, pixelCount)
+    const summary =
+      samples instanceof SampleBuffer
+        ? samples.getColumnSummary(firstSample, samplesPerPixel, pixelCount)
+        : computeColumnSummary(samples, firstSample, samplesPerPixel, pixelCount)
 
     // Pass 1: fill — batch adjacent high/mixed columns into single fillRect calls
     ctx.fillStyle = withAlpha(color, FILL_ALPHA)

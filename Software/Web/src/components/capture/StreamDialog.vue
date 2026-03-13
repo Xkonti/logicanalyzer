@@ -40,6 +40,7 @@
             dense
             outlined
             dark
+            :hint="maxSamplesHint"
           />
         </div>
 
@@ -130,6 +131,18 @@ const chunkSizeHint = computed(() => {
   if (freq < 3000) return ''
   const fps = (freq / localChunkSize.value).toFixed(1)
   return `~${fps} updates/sec (recommended: ${recommendedChunkSize.value} for ≥${TARGET_FPS} fps)`
+})
+
+const maxSamplesHint = computed(() => {
+  const n = localMaxSamples.value
+  const channels = channelConfig.selectedChannels.length || 1
+  // Per channel: raw buffer + pyramid levels (capacity/10 + capacity/100 + capacity/1000 + capacity/10000)
+  const perChannel = n + Math.ceil(n / 10) + Math.ceil(n / 100) + Math.ceil(n / 1000) + Math.ceil(n / 10000)
+  const totalBytes = perChannel * channels
+  const mb = (totalBytes / (1024 * 1024)).toFixed(1)
+  const freq = localFrequency.value
+  const seconds = freq > 0 ? (n / freq).toFixed(1) : '?'
+  return `~${mb} MB memory (${channels} ch), ~${seconds}s of data`
 })
 
 const frequencyHint = computed(() => {

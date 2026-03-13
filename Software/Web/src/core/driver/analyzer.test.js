@@ -530,8 +530,12 @@ describe('AnalyzerDriver', () => {
       expect(onComplete).toHaveBeenCalledOnce()
       const result = onComplete.mock.calls[0][0]
       expect(result.success).toBe(true)
-      expect(result.session.captureChannels[0].samples).toEqual(new Uint8Array([1, 1, 0, 0]))
-      expect(result.session.captureChannels[1].samples).toEqual(new Uint8Array([1, 0, 1, 0]))
+      expect(result.session.captureChannels[0].samples.toUint8Array()).toEqual(
+        new Uint8Array([1, 1, 0, 0]),
+      )
+      expect(result.session.captureChannels[1].samples.toUint8Array()).toEqual(
+        new Uint8Array([1, 0, 1, 0]),
+      )
     })
 
     it('calls onComplete with success=false for empty channels', async () => {

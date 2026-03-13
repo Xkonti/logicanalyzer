@@ -4,21 +4,24 @@
  * burst processing (LogicAnalyzerDriver.cs:529-616).
  */
 
+import { SampleBuffer } from '../sample-buffer.js'
+
 /**
  * Extracts per-channel sample data from raw packed samples.
  * Each raw sample is a uint32 with bits representing channel states.
+ * Returns a SampleBuffer with pre-built decimation pyramid.
  *
  * @param {Uint32Array} rawSamples - Packed multi-channel samples
  * @param {number} channelIndex - Which channel to extract (0-based bit position)
- * @returns {Uint8Array} 0/1 per sample
+ * @returns {SampleBuffer} 0/1 per sample with decimation pyramid
  */
 export function extractSamples(rawSamples, channelIndex) {
   const mask = 1 << channelIndex
-  const result = new Uint8Array(rawSamples.length)
+  const raw = new Uint8Array(rawSamples.length)
   for (let i = 0; i < rawSamples.length; i++) {
-    result[i] = (rawSamples[i] & mask) !== 0 ? 1 : 0
+    raw[i] = (rawSamples[i] & mask) !== 0 ? 1 : 0
   }
-  return result
+  return SampleBuffer.fromUint8Array(raw)
 }
 
 /**

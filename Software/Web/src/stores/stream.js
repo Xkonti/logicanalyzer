@@ -4,6 +4,7 @@ import { useLocalStorage } from '@vueuse/core'
 import { useDeviceStore } from './device.js'
 import { useViewportStore } from './viewport.js'
 import { createChannel } from '../core/driver/types.js'
+import { SampleBuffer } from '../core/sample-buffer.js'
 
 export const useStreamStore = defineStore('stream', () => {
   // Config (persisted)
@@ -59,6 +60,9 @@ export const useStreamStore = defineStore('stream', () => {
   let absoluteSamplesReceived = 0
   let samplesSinceLastReport = 0
   const FLUSH_INTERVAL_MS = 16 // ~60fps
+
+  // Pre-allocated ring buffers — one per channel (module-level, non-reactive)
+  let buffers = []
 
   /**
    * Unpacks a transposed bitstream (chunkSamples/8 bytes) into per-sample 0/1 Uint8Array.
@@ -138,38 +142,24 @@ export const useStreamStore = defineStore('stream', () => {
     const chunks = pendingChunks
     pendingChunks = []
 
-    const current = streamChannels.value
-    if (current.length === 0) return
+    if (buffers.length === 0) return
 
-    const max = maxDisplaySamples.value
-
-    // Calculate total new samples
-    let totalNew = 0
+    // Append each chunk's data directly into the pre-allocated ring buffers
     for (const chunk of chunks) {
-      totalNew += chunk.chunkSamples
+      for (let chIdx = 0; chIdx < buffers.length; chIdx++) {
+        buffers[chIdx].append(chunk.unpacked[chIdx])
+      }
     }
 
-    const updated = current.map((ch, chIdx) => {
-      const existing = ch.samples
-      const existingLen = existing ? existing.length : 0
-
-      // Allocate combined buffer
-      const combined = new Uint8Array(existingLen + totalNew)
-      if (existing) combined.set(existing)
-
-      let offset = existingLen
-      for (const chunk of chunks) {
-        combined.set(chunk.unpacked[chIdx], offset)
-        offset += chunk.chunkSamples
-      }
-
-      // Trim to maxDisplaySamples from the end
-      const trimmed = combined.length > max ? combined.slice(combined.length - max) : combined
-      return { ...ch, samples: trimmed }
-    })
+    // Update reactive state — replace channel objects to trigger Vue reactivity
+    const current = streamChannels.value
+    const updated = current.map((ch, chIdx) => ({
+      ...ch,
+      samples: buffers[chIdx],
+    }))
 
     streamChannels.value = updated
-    sampleCount.value = updated[0]?.samples?.length ?? 0
+    sampleCount.value = buffers[0]?.length ?? 0
 
     // Update display offset for loss region coordinate mapping and prune old regions
     displayOffset.value = absoluteSamplesReceived - sampleCount.value
@@ -229,11 +219,16 @@ export const useStreamStore = defineStore('stream', () => {
 
     const channelNumbers = channelsToStream.map((ch) => ch.channelNumber)
     const freq = streamFrequency.value
+    const max = maxDisplaySamples.value
+
+    // Pre-allocate ring buffers for each channel
+    buffers = channelsToStream.map(() => new SampleBuffer(max))
 
     // Create channel objects with empty sample buffers
-    streamChannels.value = channelsToStream.map((ch) =>
-      createChannel(ch.channelNumber, ch.channelName, ch.channelColor),
-    )
+    streamChannels.value = channelsToStream.map((ch, i) => ({
+      ...createChannel(ch.channelNumber, ch.channelName, ch.channelColor),
+      samples: buffers[i],
+    }))
     sampleCount.value = 0
     following.value = true
     pendingChunks = []
@@ -264,6 +259,7 @@ export const useStreamStore = defineStore('stream', () => {
     } else {
       streamError.value = result.error || 'Failed to start stream'
       streamChannels.value = []
+      buffers = []
     }
   }
 
@@ -297,6 +293,7 @@ export const useStreamStore = defineStore('stream', () => {
     absoluteSamplesReceived = 0
     samplesSinceLastReport = 0
     streamStartedAt = 0
+    buffers = []
     const device = useDeviceStore()
     device.streaming = false
   }

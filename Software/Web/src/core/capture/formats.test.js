@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { parseLac, serializeLac, parseCsv, serializeCsv } from './formats.js'
+import { SampleBuffer } from '../sample-buffer.js'
+
+/** Helper: get raw Uint8Array from a SampleBuffer or Uint8Array */
+function samplesArray(samples) {
+  if (!samples) return null
+  return samples.toUint8Array ? samples.toUint8Array() : samples
+}
 
 describe('parseLac', () => {
   it('parses modern format with per-channel samples', () => {
@@ -43,7 +50,10 @@ describe('parseLac', () => {
     expect(session.postTriggerSamples).toBe(100)
     expect(session.captureChannels).toHaveLength(2)
     expect(session.captureChannels[0].channelName).toBe('CLK')
-    expect(session.captureChannels[0].samples).toEqual(new Uint8Array([1, 0, 1, 0]))
+    expect(session.captureChannels[0].samples).toBeInstanceOf(SampleBuffer)
+    expect(samplesArray(session.captureChannels[0].samples)).toEqual(
+      new Uint8Array([1, 0, 1, 0]),
+    )
     expect(session.captureChannels[1].channelColor).toBe(0xff0000ff)
     expect(session.captureChannels[1].hidden).toBe(true)
     expect(regions).toEqual([])
@@ -66,8 +76,12 @@ describe('parseLac', () => {
     }
 
     const { session } = parseLac(JSON.stringify(lac))
-    expect(session.captureChannels[0].samples).toEqual(new Uint8Array([1, 1, 0, 0]))
-    expect(session.captureChannels[1].samples).toEqual(new Uint8Array([1, 0, 1, 0]))
+    expect(samplesArray(session.captureChannels[0].samples)).toEqual(
+      new Uint8Array([1, 1, 0, 0]),
+    )
+    expect(samplesArray(session.captureChannels[1].samples)).toEqual(
+      new Uint8Array([1, 0, 1, 0]),
+    )
   })
 
   it('parses regions with R/G/B/A color', () => {
@@ -186,9 +200,42 @@ describe('serializeLac', () => {
     expect(result.session.frequency).toBe(2000000)
     expect(result.session.preTriggerSamples).toBe(20)
     expect(result.session.captureChannels[0].channelName).toBe('SDA')
-    expect(result.session.captureChannels[0].samples).toEqual(new Uint8Array([1, 0, 1]))
+    expect(samplesArray(result.session.captureChannels[0].samples)).toEqual(
+      new Uint8Array([1, 0, 1]),
+    )
     expect(result.regions[0].regionName).toBe('R1')
     expect(result.regions[0].regionColor).toEqual({ r: 100, g: 200, b: 50, a: 180 })
+  })
+
+  it('round-trips SampleBuffer through parseLac', () => {
+    const session = {
+      frequency: 1000000,
+      preTriggerSamples: 0,
+      postTriggerSamples: 3,
+      loopCount: 0,
+      measureBursts: false,
+      captureChannels: [
+        {
+          channelNumber: 0,
+          channelName: 'CH0',
+          channelColor: null,
+          hidden: false,
+          samples: SampleBuffer.fromUint8Array(new Uint8Array([1, 0, 1])),
+        },
+      ],
+      bursts: null,
+      triggerType: 0,
+      triggerChannel: 0,
+      triggerInverted: false,
+      triggerBitCount: 0,
+      triggerPattern: 0,
+    }
+
+    const json = serializeLac(session)
+    const result = parseLac(json)
+    expect(samplesArray(result.session.captureChannels[0].samples)).toEqual(
+      new Uint8Array([1, 0, 1]),
+    )
   })
 
   it('uses PascalCase keys in output', () => {
@@ -292,9 +339,10 @@ describe('parseCsv', () => {
     const { channels } = parseCsv(csv)
     expect(channels).toHaveLength(2)
     expect(channels[0].channelName).toBe('CLK')
-    expect(channels[0].samples).toEqual(new Uint8Array([1, 0, 1, 0]))
+    expect(channels[0].samples).toBeInstanceOf(SampleBuffer)
+    expect(samplesArray(channels[0].samples)).toEqual(new Uint8Array([1, 0, 1, 0]))
     expect(channels[1].channelName).toBe('DATA')
-    expect(channels[1].samples).toEqual(new Uint8Array([0, 1, 1, 0]))
+    expect(samplesArray(channels[1].samples)).toEqual(new Uint8Array([0, 1, 1, 0]))
   })
 
   it('parses single channel', () => {
@@ -302,14 +350,14 @@ describe('parseCsv', () => {
     const { channels } = parseCsv(csv)
     expect(channels).toHaveLength(1)
     expect(channels[0].channelName).toBe('Signal')
-    expect(channels[0].samples).toEqual(new Uint8Array([1, 0, 1]))
+    expect(samplesArray(channels[0].samples)).toEqual(new Uint8Array([1, 0, 1]))
   })
 
   it('returns empty for header only', () => {
     const csv = 'CLK,DATA'
     const { channels } = parseCsv(csv)
     expect(channels).toHaveLength(2)
-    expect(channels[0].samples).toEqual(new Uint8Array(0))
+    expect(samplesArray(channels[0].samples)).toEqual(new Uint8Array(0))
   })
 
   it('returns empty for empty string', () => {
@@ -342,9 +390,29 @@ describe('serializeCsv', () => {
     const csv = serializeCsv(session)
     const { channels } = parseCsv(csv)
     expect(channels[0].channelName).toBe('CLK')
-    expect(channels[0].samples).toEqual(new Uint8Array([1, 0, 1]))
+    expect(samplesArray(channels[0].samples)).toEqual(new Uint8Array([1, 0, 1]))
     expect(channels[1].channelName).toBe('DATA')
-    expect(channels[1].samples).toEqual(new Uint8Array([0, 1, 0]))
+    expect(samplesArray(channels[1].samples)).toEqual(new Uint8Array([0, 1, 0]))
+  })
+
+  it('round-trips SampleBuffer through parseCsv', () => {
+    const session = {
+      frequency: 1000000,
+      preTriggerSamples: 0,
+      postTriggerSamples: 3,
+      loopCount: 0,
+      captureChannels: [
+        {
+          channelNumber: 0,
+          channelName: 'CH0',
+          samples: SampleBuffer.fromUint8Array(new Uint8Array([1, 0, 1])),
+        },
+      ],
+    }
+
+    const csv = serializeCsv(session)
+    const { channels } = parseCsv(csv)
+    expect(samplesArray(channels[0].samples)).toEqual(new Uint8Array([1, 0, 1]))
   })
 
   it('uses fallback channel names', () => {
