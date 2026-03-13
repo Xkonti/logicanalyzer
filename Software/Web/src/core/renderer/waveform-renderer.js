@@ -90,6 +90,7 @@ export class WaveformRenderer {
     this.userMarker = null
     this.regions = []
     this.bursts = []
+    this.cursorX = null
 
     // Layout cache (CSS pixels)
     this._width = 0
@@ -131,6 +132,11 @@ export class WaveformRenderer {
   /** Set the burst marker sample indices array. */
   setBursts(bursts) {
     this.bursts = bursts
+  }
+
+  /** Set the cursor line position (CSS pixels), or null to hide. */
+  setCursorX(x) {
+    this.cursorX = x
   }
 
   // ── Layout ─────────────────────────────────────────────────────────────
@@ -220,6 +226,7 @@ export class WaveformRenderer {
     this._drawTriggerMarker(ctx, totalHeight)
     this._drawBurstMarkers(ctx, totalHeight)
     this._drawUserMarker(ctx, totalHeight)
+    this._drawCursorLine(ctx, totalHeight)
 
     ctx.restore()
   }
@@ -477,6 +484,19 @@ export class WaveformRenderer {
     ctx.lineTo(Math.round(x) + 0.5, totalHeight)
     ctx.stroke()
     ctx.setLineDash([])
+  }
+
+  _drawCursorLine(ctx, totalHeight) {
+    if (this.cursorX == null) return
+    const x = Math.round(this.cursorX) + 0.5
+    if (x < 0 || x > this._width) return
+
+    ctx.strokeStyle = COLORS.cursorLine
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, totalHeight)
+    ctx.stroke()
   }
 
   /** Release resources. */

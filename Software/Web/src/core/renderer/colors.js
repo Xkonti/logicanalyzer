@@ -46,6 +46,7 @@ export const COLORS = {
   dataLossFill: 'rgba(140, 30, 30, 0.35)',
   timelineBackground: 'rgb(28,28,28)',
   timelineTick: 'rgba(255,255,255,0.7)',
+  cursorLine: 'rgba(255, 255, 255, 0.5)',
 }
 
 /**

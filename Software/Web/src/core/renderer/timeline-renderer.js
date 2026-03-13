@@ -121,6 +121,10 @@ export class TimelineRenderer {
     // Start at the first aligned tick before the viewport
     const firstTick = Math.ceil(this.firstSample / interval) * interval
 
+    // When individual samples are visible, offset ticks to sample centers
+    // so they align with the waveform grid lines and cursor.
+    const centerOffset = sampleWidth >= 1 ? sampleWidth / 2 : 0
+
     // Draw minor ticks first (behind major)
     if (minorInterval > 0) {
       const firstMinor = Math.ceil(this.firstSample / minorInterval) * minorInterval
@@ -129,7 +133,7 @@ export class TimelineRenderer {
       ctx.globalAlpha = 0.3
       ctx.beginPath()
       for (let s = firstMinor; s < this.firstSample + this.visibleSamples; s += minorInterval) {
-        const x = Math.round((s - this.firstSample) * sampleWidth) + 0.5
+        const x = Math.round((s - this.firstSample) * sampleWidth + centerOffset) + 0.5
         ctx.moveTo(x, height * 0.65)
         ctx.lineTo(x, height)
       }
@@ -151,7 +155,7 @@ export class TimelineRenderer {
     const lastSample = this.firstSample + this.visibleSamples
 
     for (let s = firstTick; s < lastSample; s += interval) {
-      const x = Math.round((s - this.firstSample) * sampleWidth) + 0.5
+      const x = Math.round((s - this.firstSample) * sampleWidth + centerOffset) + 0.5
 
       // Tick line
       ctx.moveTo(x, tickTop)
