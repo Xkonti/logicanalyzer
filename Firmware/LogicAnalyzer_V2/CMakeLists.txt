@@ -24,47 +24,8 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 
-include(LogicAnalyzer_Build_Settings.cmake)
-
-if(NOT BOARD_TYPE)
-    message(FATAL_ERROR "Board not set, configure the build on LogicAnalyzer_Build_Settings.cmake")
-endif()
-
-if((BOARD_TYPE STREQUAL "BOARD_PICO_W") OR (BOARD_TYPE STREQUAL "BOARD_PICO_W_WIFI"))
-    message(STATUS "Setting PICO_BOARD to pico_w")
-    set(PICO_BOARD pico_w CACHE STRING "Board type")
-    message(STATUS "Forcing Debug for W build")
-    set(CMAKE_BUILD_TYPE Debug)
-    if(TURBO_MODE)
-        message(FATAL_ERROR "Cannot enable turbo mode for the Pico W")
-    endif()
-elseif((BOARD_TYPE STREQUAL "BOARD_PICO_2_W") OR (BOARD_TYPE STREQUAL "BOARD_PICO_2_W_WIFI"))
-    message(STATUS "Setting PICO_BOARD to pico2_w")
-    set(PICO_BOARD pico2_w CACHE STRING "Board type")
-    message(STATUS "Forcing Debug for W build")
-    set(CMAKE_BUILD_TYPE Debug)
-    if(TURBO_MODE)
-        message(FATAL_ERROR "Cannot enable turbo mode for the Pico 2 W")
-    endif()
-elseif(BOARD_TYPE STREQUAL "BOARD_PICO_2")
-    message(STATUS "Setting PICO_BOARD to pico2")
-    set(PICO_BOARD pico2 CACHE STRING "Board type")
-else()
-    message(STATUS "Setting PICO_BOARD to pico")
-    set(PICO_BOARD pico CACHE STRING "Board type")
-endif()
-
-if(TURBO_MODE)
-    message(WARNING "WARNING!! Turbo mode enabled! Device will be extremely overclocked and overvoltaged!")
-    add_compile_definitions(TURBO_MODE)
-endif()
-
-if(NOT DEBUG_BUILD)
-    if((BOARD_TYPE STREQUAL "BOARD_PICO") OR (BOARD_TYPE STREQUAL "BOARD_ZERO") OR (BOARD_TYPE STREQUAL "BOARD_PICO_2"))
-        message(STATUS "Forcing Release for RAM-only build")
-        set(CMAKE_BUILD_TYPE Release)
-    endif()
-endif()
+set(PICO_BOARD pico2_w CACHE STRING "Board type")
+set(CMAKE_BUILD_TYPE Debug)
 
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -80,14 +41,6 @@ pico_sdk_init()
 FILE(GLOB CSources *.c)
 ADD_EXECUTABLE(LogicAnalyzer ${CSources})
 
-# Enable ram-only build for the base pico and zero, increases timming precission
-if(NOT DEBUG_BUILD)
-    if((BOARD_TYPE STREQUAL "BOARD_PICO") OR (BOARD_TYPE STREQUAL "BOARD_ZERO") OR (BOARD_TYPE STREQUAL "BOARD_PICO_2"))
-        message(STATUS "Setting RAM-only compilation")
-        pico_set_binary_type(LogicAnalyzer copy_to_ram)
-    endif()
-endif()
-
 # Create C header file with the name <pio program>.pio.h
 pico_generate_pio_header(${PROJECT_NAME}  
         ${CMAKE_CURRENT_LIST_DIR}/LogicAnalyzer.pio
@@ -100,53 +53,8 @@ add_compile_definitions(FIRMWARE_VERSION="V6_5")
 pico_enable_stdio_uart(LogicAnalyzer 0)
 pico_enable_stdio_usb(LogicAnalyzer 1)
 
-if(BOARD_TYPE STREQUAL "BOARD_PICO")
-    message(STATUS "Configuring for Pico")
-    add_compile_definitions(BUILD_PICO)
-endif()
-if(BOARD_TYPE STREQUAL "BOARD_PICO_2")
-    message(STATUS "Configuring for Pico 2")
-    add_compile_definitions(BUILD_PICO_2)
-    add_compile_definitions(CORE_TYPE_2)
-endif()
-if(BOARD_TYPE STREQUAL "BOARD_PICO_W")
-    message(STATUS "Configuring for Pico W without WiFi support")
-    set(PICO_BOARD pico_w)
-    add_compile_definitions(BUILD_PICO_W)
-    set (CYW_LIB pico_cyw43_arch_none)
-endif()
-if(BOARD_TYPE STREQUAL "BOARD_PICO_W_WIFI")
-    message(STATUS "Configuring for Pico W with WiFi support")
-    add_compile_definitions(BUILD_PICO_W_WIFI)
-    # Disable background timer that calls tud_task() on Core 0.
-    # Core 1 will exclusively handle all TinyUSB polling.
-    add_compile_definitions(PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=0)
-    set (CYW_LIB pico_cyw43_arch_lwip_poll)
-endif()
-if(BOARD_TYPE STREQUAL "BOARD_PICO_2_W")
-    message(STATUS "Configuring for Pico W without WiFi support")
-    set(PICO_BOARD pico2_w)
-    add_compile_definitions(BUILD_PICO_2_W)
-    add_compile_definitions(CORE_TYPE_2)
-    set (CYW_LIB pico_cyw43_arch_none)
-endif()
-if(BOARD_TYPE STREQUAL "BOARD_PICO_2_W_WIFI")
-    message(STATUS "Configuring for Pico W with WiFi support")
-    add_compile_definitions(BUILD_PICO_2_W_WIFI)
-    add_compile_definitions(CORE_TYPE_2)
-    # Disable background timer that calls tud_task() on Core 0.
-    # Core 1 will exclusively handle all TinyUSB polling.
-    add_compile_definitions(PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=0)
-    set (CYW_LIB pico_cyw43_arch_lwip_poll)
-endif()
-if(BOARD_TYPE STREQUAL "BOARD_ZERO")
-    message(STATUS "Configuring for Zero")
-    add_compile_definitions(BUILD_ZERO)
-endif()
-if(BOARD_TYPE STREQUAL "BOARD_INTERCEPTOR")
-    message(STATUS "Configuring for Interceptor")
-    add_compile_definitions(BUILD_INTERCEPTOR)
-endif()
+add_compile_definitions(PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=0)
+set(CYW_LIB pico_cyw43_arch_lwip_poll)
 
 # Add any user requested librariesUna pregu
 target_link_libraries(LogicAnalyzer
@@ -157,7 +65,6 @@ target_link_libraries(LogicAnalyzer
         hardware_flash
         hardware_adc
         hardware_exception
-        hardware_vreg
         pico_multicore
         pico_base_headers
         pico_multicore
