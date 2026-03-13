@@ -1,23 +1,23 @@
 <template>
   <q-dialog :model-value="modelValue" @update:model-value="$emit('update:modelValue', $event)">
-    <q-card style="min-width: 600px; max-width: 700px" class="bg-dark text-white">
-      <q-card-section>
+    <q-card style="min-width: 500px; max-width: 600px" class="bg-dark text-white">
+      <q-card-section class="q-pb-none">
         <div class="text-h6">Device Info & Settings</div>
       </q-card-section>
 
-      <q-card-section class="q-pt-none scroll" style="max-height: 60vh">
-        <!-- Device Info -->
-        <div class="text-subtitle2 q-mb-sm">Device Information</div>
-        <q-list dense class="q-mb-md">
-          <q-item v-for="item in infoItems" :key="item.label">
-            <q-item-section>{{ item.label }}</q-item-section>
-            <q-item-section side class="text-white">{{ item.value }}</q-item-section>
-          </q-item>
-        </q-list>
+      <q-card-section class="q-pt-sm scroll" style="max-height: 70vh">
+        <!-- Device Info — compact grid -->
+        <div class="text-subtitle2 q-mb-xs">Device</div>
+        <div class="row q-col-gutter-x-md q-col-gutter-y-xs q-mb-sm">
+          <div class="col-6" v-for="item in infoItems" :key="item.label">
+            <span class="text-grey-6 text-caption">{{ item.label }}</span>
+            <div>{{ item.value }}</div>
+          </div>
+        </div>
 
         <!-- Capture Mode Limits -->
-        <div class="text-subtitle2 q-mb-sm">Capture Mode Limits</div>
-        <q-markup-table dense flat class="bg-dark text-white q-mb-md">
+        <div class="text-subtitle2 q-mb-xs">Capture Limits</div>
+        <q-markup-table dense flat class="bg-dark text-white q-mb-sm">
           <thead>
             <tr>
               <th class="text-left">Mode</th>
@@ -25,7 +25,6 @@
               <th class="text-right">Max Pre</th>
               <th class="text-right">Min Post</th>
               <th class="text-right">Max Post</th>
-              <th class="text-right">Max Total</th>
             </tr>
           </thead>
           <tbody>
@@ -35,23 +34,23 @@
               <td class="text-right">{{ row.maxPre }}</td>
               <td class="text-right">{{ row.minPost }}</td>
               <td class="text-right">{{ row.maxPost }}</td>
-              <td class="text-right">{{ row.maxTotal }}</td>
             </tr>
           </tbody>
         </q-markup-table>
 
         <!-- Network Settings -->
-        <q-separator dark class="q-mb-md" />
-        <div class="text-subtitle2 q-mb-xs">Network Settings</div>
-        <div class="text-caption text-grey-6 q-mb-sm">
-          Settings are write-only — the device does not report its current configuration.
+        <q-separator dark class="q-mb-sm" />
+        <div class="text-subtitle2 q-mb-none">Network Settings</div>
+        <div class="text-caption text-grey-6 q-mb-xs">
+          Write-only — the device does not report its current configuration.
         </div>
-        <div class="column q-gutter-y-sm">
+        <div class="column q-gutter-y-xs">
           <q-input
             v-model="form.ssid"
             label="WiFi SSID"
             maxlength="32"
             :rules="[ssidRule]"
+            hide-bottom-space
             dense
             outlined
             dark
@@ -62,33 +61,43 @@
             type="password"
             maxlength="63"
             :rules="[passwordRule]"
+            hide-bottom-space
             dense
             outlined
             dark
           />
-          <q-input
-            v-model="form.ipAddress"
-            label="IP Address"
-            maxlength="15"
-            :rules="[ipRule]"
-            dense
-            outlined
-            dark
-          />
-          <q-input
-            v-model.number="form.port"
-            label="Port"
-            type="number"
-            :rules="[portRule]"
-            dense
-            outlined
-            dark
-          />
+          <div class="row q-col-gutter-x-sm">
+            <div class="col">
+              <q-input
+                v-model="form.ipAddress"
+                label="IP Address"
+                maxlength="15"
+                :rules="[ipRule]"
+                hide-bottom-space
+                dense
+                outlined
+                dark
+              />
+            </div>
+            <div class="col-4">
+              <q-input
+                v-model.number="form.port"
+                label="Port"
+                type="number"
+                :rules="[portRule]"
+                hide-bottom-space
+                dense
+                outlined
+                dark
+              />
+            </div>
+          </div>
           <q-input
             v-model="form.hostname"
             label="Hostname (optional)"
             maxlength="32"
             :rules="[hostnameRule]"
+            hide-bottom-space
             dense
             outlined
             dark
@@ -97,20 +106,25 @@
             label="Save Network Settings"
             color="positive"
             no-caps
+            dense
             :loading="saving"
             :disable="!formValid"
             @click="onSave"
           />
-          <q-banner v-if="saveResult === 'success'" dense class="bg-positive text-white">
+          <q-banner
+            v-if="saveResult === 'success'"
+            dense
+            class="bg-positive text-white q-py-xs"
+          >
             Network settings saved successfully.
           </q-banner>
-          <q-banner v-if="saveResult === 'error'" dense class="bg-negative text-white">
+          <q-banner v-if="saveResult === 'error'" dense class="bg-negative text-white q-py-xs">
             Failed to save. {{ device.error }}
           </q-banner>
         </div>
       </q-card-section>
 
-      <q-card-actions align="right">
+      <q-card-actions align="right" class="q-pt-none">
         <q-btn flat label="Close" color="grey-4" no-caps v-close-popup />
       </q-card-actions>
     </q-card>
@@ -131,7 +145,8 @@ const device = useDevice()
 // --- Formatters ---
 
 function formatFrequency(hz) {
-  if (hz >= 1_000_000_000) return `${(hz / 1_000_000_000).toFixed(hz % 1_000_000_000 ? 1 : 0)} GHz`
+  if (hz >= 1_000_000_000)
+    return `${(hz / 1_000_000_000).toFixed(hz % 1_000_000_000 ? 1 : 0)} GHz`
   if (hz >= 1_000_000) return `${(hz / 1_000_000).toFixed(hz % 1_000_000 ? 1 : 0)} MHz`
   if (hz >= 1_000) return `${(hz / 1_000).toFixed(hz % 1_000 ? 1 : 0)} kHz`
   return `${hz} Hz`
@@ -170,7 +185,6 @@ const limitsRows = computed(() => {
     maxPre: limits.maxPreSamples.toLocaleString(),
     minPost: limits.minPostSamples.toLocaleString(),
     maxPost: limits.maxPostSamples.toLocaleString(),
-    maxTotal: limits.maxTotalSamples.toLocaleString(),
   }))
 })
 
