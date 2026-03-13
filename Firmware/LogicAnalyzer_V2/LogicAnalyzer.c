@@ -17,35 +17,29 @@
 #include "tusb.h"
 #include "pico/unique_id.h"
 #include "pico/bootrom.h"
+#include "LogicAnalyzer_Stream.h"
+#include "hardware/sync.h"
 
 #ifdef WS2812_LED
     #include "LogicAnalyzer_W2812.h"
 #endif
 
-#if defined (CYGW_LED) || defined(USE_CYGW_WIFI)
 
-    #include "pico/cyw43_arch.h"
+#include "pico/cyw43_arch.h"
+#include "Event_Machine.h"
+#include "Shared_Buffers.h"
+#include "LogicAnalyzer_WiFi.h"
 
-    #ifdef USE_CYGW_WIFI
+bool cywReady = false;
+bool skipWiFiData = false;
+bool skipUsbData = false;
+bool hadUsbData = false;
+bool hadWiFiData = false;
+bool dataFromWiFi = false;
+EVENT_FROM_WIFI wifiEventBuffer;
+WIFI_SETTINGS_REQUEST* wReq;
 
-        #include "Event_Machine.h"
-        #include "Shared_Buffers.h"
-        #include "LogicAnalyzer_WiFi.h"
-        #include "hardware/regs/usb.h"
-        #include "hardware/structs/usb.h"
-
-        bool usbDisabled = false;
-        bool cywReady = false;
-        bool skipWiFiData = false;
-        bool dataFromWiFi = false;
-        EVENT_FROM_WIFI wifiEventBuffer;
-        WIFI_SETTINGS_REQUEST* wReq;
-
-        #define MULTICORE_LOCKOUT_TIMEOUT (uint64_t)10 * 365 * 24 * 60 * 60 * 1000 * 1000
-
-    #endif
-
-#endif
+#define MULTICORE_LOCKOUT_TIMEOUT (uint64_t)10 * 365 * 24 * 60 * 60 * 1000 * 1000
 
 #if defined (GPIO_LED)
     #define INIT_LED() {\
@@ -58,22 +52,17 @@
 
     #define INIT_LED() { }
 
-    #ifdef USE_CYGW_WIFI
-        #define LED_ON() {\
-        EVENT_FROM_FRONTEND lonEvt;\
-        lonEvt.event = LED_ON;\
-        event_push(&frontendToWifi, &lonEvt);\
-        }
+    #define LED_ON() {\
+    EVENT_FROM_FRONTEND lonEvt;\
+    lonEvt.event = LED_ON;\
+    event_push(&frontendToWifi, &lonEvt);\
+    }
 
-        #define LED_OFF() {\
-        EVENT_FROM_FRONTEND loffEvt;\
-        loffEvt.event = LED_OFF;\
-        event_push(&frontendToWifi, &loffEvt);\
-        }
-    #else
-        #define LED_ON() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1)
-        #define LED_OFF() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0)
-    #endif
+    #define LED_OFF() {\
+    EVENT_FROM_FRONTEND loffEvt;\
+    loffEvt.event = LED_OFF;\
+    event_push(&frontendToWifi, &loffEvt);\
+    }
 
 #elif defined (WS2812_LED)
     #define INIT_LED() init_rgb()
@@ -85,23 +74,20 @@
     #define LED_OFF() { }
 #endif
 
-//Buffer used to store received data
-uint8_t messageBuffer[128];
+//Buffer used to store received data (160 bytes to fit WIFI_SETTINGS_REQUEST = 148 + framing)
+uint8_t messageBuffer[160];
 //Position in the buffer
-uint8_t bufferPos = 0;
+uint16_t bufferPos = 0;
 //Capture status
 bool capturing = false;
-//Preview status
-bool previewing = false;
-PREVIEW_REQUEST previewReqData;
+//Streaming status
+bool streaming_active = false;
 
 bool blink = false;
 uint32_t blinkCount = 0;
 
 //Capture request pointer
 CAPTURE_REQUEST* req;
-
-#ifdef USE_CYGW_WIFI
 
 /// @brief Stores a new WiFi configuration in the flash of the device
 /// @param settings Settings to store
@@ -148,14 +134,11 @@ void storeSettings(WIFI_SETTINGS* settings)
 
 }
 
-#endif
-
 /// @brief Sends a response message to the host application in string mode
 /// @param response The message to be sent (null terminated)
 /// @param toWiFi If true the message is sent to a WiFi endpoint, else to the USB connection through STDIO
 void sendResponse(const char* response, bool toWiFi)
 {
-    #ifdef USE_CYGW_WIFI
     if(toWiFi)
     {
         EVENT_FROM_FRONTEND evt;
@@ -166,46 +149,36 @@ void sendResponse(const char* response, bool toWiFi)
         event_push(&frontendToWifi, &evt);
     }
     else
-    #endif
-        printf(response);
-}
-
-/// @brief Transfer a buffer of data through USB using the TinyUSB CDC functions
-/// @param data Buffer of data to transfer
-/// @param len Length of the buffer
-void cdc_transfer(unsigned char* data, int len)
-{
-
-    int left = len;
-    int pos = 0;
-
-    while(left > 0)
     {
-        int avail = (int) tud_cdc_write_available();
-
-        if(avail > left)
-            avail = left;
-
-        if(avail)
-        {
-            int transferred = (int) tud_cdc_write(data + pos, avail);
-            tud_task();
-            tud_cdc_write_flush();
-            
-            pos += transferred;
-            left -= transferred;
-        }
-        else
-        {
-            tud_task();
-            tud_cdc_write_flush();
-            if (!tud_cdc_connected())
-                break;
-        }
+        EVENT_TO_USB evt;
+        evt.event = USB_SEND_DATA;
+        uint8_t len = strlen(response);
+        if (len > sizeof(evt.data))
+            len = sizeof(evt.data);
+        evt.dataLength = len;
+        memcpy(evt.data, response, len);
+        event_push(&frontendToUsb, &evt);
     }
 }
 
-#ifdef USE_CYGW_WIFI
+/// @brief Transfer a buffer of data through USB via Core 1 bulk transfer mechanism.
+/// Core 0 sets up the descriptor, Core 1 sends the data. Blocks until complete.
+/// @param data Buffer of data to transfer
+/// @param len Length of the buffer
+void usb_bulk_transfer_blocking(unsigned char* data, int len)
+{
+    usb_bulk.data = data;
+    usb_bulk.length = len;
+    usb_bulk.complete = false;
+    __dmb();
+    usb_bulk.pending = true;
+
+    /* Wait for Core 1 to complete the transfer */
+    while (!usb_bulk.complete)
+        tight_loop_contents();
+    __dmb();  /* ensure Core 1's writes are visible before we set up next transfer */
+}
+
 /// @brief Transfer a buffer of data through WiFi
 /// @param data Buffer of data to transfer
 /// @param len Length of the buffer
@@ -230,7 +203,6 @@ void wifi_transfer(unsigned char* data, int len)
         event_push(&frontendToWifi, &evt);
     }
 }
-#endif
 
 /// @brief Processes data received from the host application
 /// @param data The received data
@@ -248,7 +220,7 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
             bufferPos = 0;
         else if(bufferPos == 2 && messageBuffer[1] != 0xAA) //If we have stored the second byte and it is not 0xAA restart reception
             bufferPos = 0;
-        else if(bufferPos >= 256) //Have we overflowed the buffer? then inform to the host and restart reception
+        else if(bufferPos >= sizeof(messageBuffer)) //Have we overflowed the buffer? then inform to the host and restart reception
         {
             sendResponse("ERR_MSG_OVERFLOW\n", fromWiFi);
             bufferPos = 0;
@@ -300,8 +272,11 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                     case 1: //Capture request
 
-                        if(previewing)
-                            previewing = false;
+                        if(streaming_active)
+                        {
+                            sendResponse("ERR_BUSY\n", fromWiFi);
+                            break;
+                        }
 
                         req = (CAPTURE_REQUEST*)&messageBuffer[3]; //Get the request pointer
 
@@ -342,8 +317,6 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                         break;
                     
-                    #ifdef USE_CYGW_WIFI
-
                     case 2: //Update WiFi settings
 
                         wReq = (WIFI_SETTINGS_REQUEST*)&messageBuffer[3];
@@ -387,24 +360,14 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
 
                         if(!fromWiFi)
                             sendResponse("ERR_UNSUPPORTED\n", fromWiFi);
-                        else 
+                        else
                         {
                             EVENT_FROM_FRONTEND powerEvent;
                             powerEvent.event = GET_POWER_STATUS;
                             event_push(&frontendToWifi, &powerEvent);
                         }
-                        
+
                         break;
-
-                    #else
-
-                    case 2:
-                    case 3:
-
-                        sendResponse("ERR_UNSUPPORTED\n", fromWiFi);
-                        break;
-
-                    #endif
 
                     case 4:
 
@@ -428,54 +391,34 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                         LED_ON();
                         break;
 
-                    case 7: //Start preview
+                    case 10: //Start stream
                     {
-                        if(capturing)
+                        if(capturing || streaming_active)
                         {
                             sendResponse("ERR_BUSY\n", fromWiFi);
                             break;
                         }
 
-                        PREVIEW_REQUEST* previewReq = (PREVIEW_REQUEST*)&messageBuffer[3];
+                        STREAM_REQUEST* streamReq = (STREAM_REQUEST*)&messageBuffer[3];
 
-                        if(previewReq->channelCount < 1 || previewReq->channelCount > MAX_CHANNELS)
+                        if(streamReq->channelCount < 1 || streamReq->channelCount > MAX_CHANNELS)
                         {
                             sendResponse("ERR_PARAMS\n", fromWiFi);
                             break;
                         }
 
-                        for(int i = 0; i < previewReq->channelCount; i++)
+                        if(!StartStream(streamReq, fromWiFi))
                         {
-                            if(previewReq->channels[i] >= MAX_CHANNELS)
-                            {
-                                sendResponse("ERR_PARAMS\n", fromWiFi);
-                                goto end_case7;
-                            }
-                        }
-
-                        if(previewReq->intervalUs < 1000)
-                        {
-                            sendResponse("ERR_PARAMS\n", fromWiFi);
+                            sendResponse("STREAM_ERROR\n", fromWiFi);
                             break;
                         }
 
-                        if(previewReq->samplesPerInterval < 1 || previewReq->samplesPerInterval > 16)
-                        {
-                            sendResponse("ERR_PARAMS\n", fromWiFi);
-                            break;
-                        }
-
-                        memcpy(&previewReqData, previewReq, sizeof(PREVIEW_REQUEST));
-                        previewing = true;
-                        sendResponse("PREVIEW_STARTED\n", fromWiFi);
-
-                        end_case7:
+                        streaming_active = true;
                         break;
                     }
 
-                    case 8: //Stop preview
-                        previewing = false;
-                        sendResponse("PREVIEW_STOPPED\n", fromWiFi);
+                    case 11: //Stop stream
+                        StopStream();
                         break;
 
                     default:
@@ -509,35 +452,6 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
     //have any data, but the capture request has a CAPTURE_REQUEST struct as data.
 }
 
-/// @brief Receive and process USB data from the host application
-/// @param skipProcessing If true the received data is not processed (used for cleanup)
-/// @return True if anything is received, false if not
-bool processUSBInput(bool skipProcessing)
-{
-    //Try to get char
-    uint data = getchar_timeout_us(0);
-
-    //Timeout? Then leave
-    if(data == PICO_ERROR_TIMEOUT)
-        return false;
-
-    uint8_t filteredData = (uint8_t)data;
-
-    if(!skipProcessing)
-        processData(&filteredData, 1, false);
-
-    return true;
-
-}
-
-#ifdef USE_CYGW_WIFI
-
-/// @brief Purges any pending data in the USB input
-void purgeUSBData()
-{
-    while(getchar_timeout_us(0) != PICO_ERROR_TIMEOUT);
-}
-
 /// @brief Send a string response with the power status
 /// @param status Status received from the WiFi core
 void sendPowerStatus(POWER_STATUS* status)
@@ -563,17 +477,14 @@ void wifiEvent(void* event)
             cywReady = true;
             break;
         case CONNECTED:
-            usbDisabled = true;
-            //disableUSB();
+            dataFromWiFi = true;
             break;
         case DISCONNECTED:
-            usbDisabled = false;
-            purgeUSBData();
-            //enableUSB();
+            dataFromWiFi = false;
             break;
         case DATA_RECEIVED:
             if(skipWiFiData)
-                dataFromWiFi = true;
+                hadWiFiData = true;
             else
                 processData(wEvent->data, wEvent->dataLength, true);
             break;
@@ -588,152 +499,74 @@ void wifiEvent(void* event)
 }
 
 /// @brief Receives and processes input from the host application (when connected through WiFi)
-/// @param skipProcessing /// @param skipProcessing If true the received data is not processed (used for cleanup)
+/// @param skipProcessing If true the received data is not processed (used for cleanup)
 /// @return True if anything is received, false if not
 bool processWiFiInput(bool skipProcessing)
 {
-    bool res = event_has_events(&wifiToFrontend);
-
     if(skipProcessing)
     {
         skipWiFiData = true;
-        dataFromWiFi = false;
     }
 
     event_process_queue(&wifiToFrontend, &wifiEventBuffer, 8);
 
-    skipWiFiData = false;    
-    
-    return dataFromWiFi;
+    skipWiFiData = false;
+
+    return false;
 }
 
-#endif
+/* USB event buffer for Core 0 processing */
+EVENT_FROM_USB usbInputEventBuffer;
+
+/* Track USB connection state from events */
+static bool usbConnected = false;
+
+/// @brief Callback for the USB input event queue
+/// @param event Received event
+void usbInputEvent(void* event)
+{
+    EVENT_FROM_USB* uEvent = (EVENT_FROM_USB*)event;
+
+    switch(uEvent->event)
+    {
+        case USB_CONNECTED:
+            usbConnected = true;
+            bufferPos = 0;
+            break;
+        case USB_DISCONNECTED:
+            usbConnected = false;
+            break;
+        case USB_DATA_RECEIVED:
+            if(!skipUsbData)
+                processData((uint8_t*)uEvent->data, uEvent->dataLength, false);
+            else
+                hadUsbData = true;
+            break;
+    }
+}
 
 /// @brief Process input data from the host application if it is available
 void processInput()
 {
-    #ifdef USE_CYGW_WIFI
-        if(!usbDisabled)
-            processUSBInput(false);
-
-        processWiFiInput(false);
-    #else
-        processUSBInput(false);
-    #endif
+    event_process_queue(&usbToFrontend, &usbInputEventBuffer, 8);
+    processWiFiInput(false);
 }
 
 /// @brief Processes input data from the host application to check if there is any cancel capture request
 /// @return True if there was input data
 bool processCancel()
 {
-    #ifdef USE_CYGW_WIFI
-        if(!usbDisabled)
-            if(processUSBInput(true))
-                return true;
+    skipUsbData = true;
+    hadUsbData = false;
+    event_process_queue(&usbToFrontend, &usbInputEventBuffer, 8);
+    skipUsbData = false;
 
-        return processWiFiInput(true);
-    #else
-        return processUSBInput(true);
-    #endif
-}
+    skipWiFiData = true;
+    hadWiFiData = false;
+    event_process_queue(&wifiToFrontend, &wifiEventBuffer, 8);
+    skipWiFiData = false;
 
-/// @brief Runs the real-time preview loop, sending periodic GPIO snapshots to the host
-void runPreview()
-{
-    uint8_t channelCount = previewReqData.channelCount;
-    uint8_t samplesPerInterval = previewReqData.samplesPerInterval;
-    uint32_t intervalUs = previewReqData.intervalUs;
-
-    //Map logical channels to GPIO pins
-    uint8_t gpioPins[MAX_CHANNELS];
-    for(int i = 0; i < channelCount; i++)
-    {
-        uint8_t chIdx = previewReqData.channels[i];
-        gpioPins[i] = pinMap[chIdx];
-    }
-
-    //Configure pins as inputs
-    for(int i = 0; i < channelCount; i++)
-    {
-        gpio_init(gpioPins[i]);
-        gpio_set_dir(gpioPins[i], GPIO_IN);
-    }
-
-    //Calculate packed bytes per sample
-    uint8_t bytesPerSample = (channelCount + 7) / 8;
-    //Packet: 2 marker + 1 spi + 1 chCount + data
-    uint8_t packetSize = 2 + 1 + 1 + samplesPerInterval * bytesPerSample;
-    uint8_t packet[128]; //Max: 2+1+1+16*3 = 52 bytes
-
-    while(previewing)
-    {
-        //Build packet header
-        packet[0] = 0xAB;
-        packet[1] = 0xCD;
-        packet[2] = samplesPerInterval;
-        packet[3] = channelCount;
-
-        uint8_t dataPos = 4;
-
-        for(int s = 0; s < samplesPerInterval; s++)
-        {
-            uint32_t gpioState = gpio_get_all();
-
-            //Clear the bytes for this sample
-            for(int b = 0; b < bytesPerSample; b++)
-                packet[dataPos + b] = 0;
-
-            //Pack channel bits into bytes (LSB-first)
-            for(int ch = 0; ch < channelCount; ch++)
-            {
-                if(gpioState & (1u << gpioPins[ch]))
-                    packet[dataPos + (ch / 8)] |= (1u << (ch % 8));
-            }
-
-            dataPos += bytesPerSample;
-        }
-
-        #ifdef USE_CYGW_WIFI
-        if(usbDisabled)
-        {
-            wifi_transfer(packet, packetSize);
-        }
-        else
-        #endif
-        {
-            cdc_transfer(packet, packetSize);
-            tud_cdc_write_flush();
-            tud_task();
-        }
-
-        //Process input to check for stop commands
-        #ifdef USE_CYGW_WIFI
-        if(!usbDisabled)
-        {
-            while(processUSBInput(false))
-            {
-                if(!previewing)
-                    break;
-            }
-        }
-        while(processWiFiInput(false))
-        {
-            if(!previewing)
-                break;
-        }
-        #else
-        while(processUSBInput(false))
-        {
-            if(!previewing)
-                break;
-        }
-        #endif
-
-        if(!previewing)
-            break;
-
-        sleep_us(intervalUs);
-    }
+    return hadUsbData || hadWiFiData;
 }
 
 /// @brief Main app loop
@@ -773,20 +606,25 @@ int main()
     //Initialize USB stdio
     stdio_init_all();
 
-    #if defined (BUILD_PICO_W) || defined (BUILD_PICO_2_W)
-        cyw43_arch_init();
-    #elif defined (BUILD_PICO_W_WIFI) || defined (BUILD_PICO_2_W_WIFI)
-        event_machine_init(&wifiToFrontend, wifiEvent, sizeof(EVENT_FROM_WIFI), 8);
-            multicore_launch_core1(runWiFiCore);
-            while(!cywReady)
-                event_process_queue(&wifiToFrontend, &wifiEventBuffer, 1);
-    #endif
+    /* Init event queues for Core 0 side */
+    event_machine_init(&wifiToFrontend, wifiEvent, sizeof(EVENT_FROM_WIFI), 8);
+    event_machine_init(&usbToFrontend, usbInputEvent, sizeof(EVENT_FROM_USB), 8);
 
-    //A bit of delay, if the program tries to send data before Windows has identified the device it may crash
-    sleep_ms(1000);
+    /* Poll tud_task() on Core 0 until USB is enumerated.
+     * Core 1 will take over exclusive TinyUSB access after launch. */
+    {
+        absolute_time_t deadline = make_timeout_time_ms(2000);
+        while (!time_reached(deadline))
+            tud_task();
+    }
+
+    /* Launch Core 1 — it takes over all USB I/O */
+    multicore_launch_core1(runWiFiCore);
+    while(!cywReady)
+        event_process_queue(&wifiToFrontend, &wifiEventBuffer, 1);
 
     //Clear message buffer
-    memset(messageBuffer, 0, 128);
+    memset(messageBuffer, 0, sizeof(messageBuffer));
 
     //Configure led
     INIT_LED();
@@ -811,26 +649,16 @@ int main()
                 //Send the data to the host
                 uint8_t* lengthPointer = (uint8_t*)&length;
 
-                //Send capture length
-                
-
-                #ifdef USE_CYGW_WIFI
-
-                    if(usbDisabled)
-                    {
-                        sleep_ms(2000);
-                        wifi_transfer(lengthPointer, 4);
-                    }
-                    else
-                    {
-                        sleep_ms(100);
-                        cdc_transfer(lengthPointer, 4);
-                    }
-
-                #else
+                if(dataFromWiFi)
+                {
+                    sleep_ms(2000);
+                    wifi_transfer(lengthPointer, 4);
+                }
+                else
+                {
                     sleep_ms(100);
-                    cdc_transfer(lengthPointer, 4);
-                #endif
+                    usb_bulk_transfer_blocking(lengthPointer, 4);
+                }
 
                 sleep_ms(100);
 
@@ -847,55 +675,38 @@ int main()
                         break;
                 }
 
-                #ifdef USE_CYGW_WIFI
-
-                    //Send the samples
-                    if(usbDisabled)
-                    {
-                        if(first + length > CAPTURE_BUFFER_SIZE)
-                        {
-                            wifi_transfer(buffer + first, CAPTURE_BUFFER_SIZE - first);
-                            wifi_transfer(buffer, (first + length) - CAPTURE_BUFFER_SIZE);
-                        }
-                        else
-                            wifi_transfer(buffer + first, length);
-
-                        wifi_transfer(&stampsLength, 1);
-
-                        if(stampsLength > 1)
-                            wifi_transfer((unsigned char*)timestamps, stampsLength * 4);
-                    }
-                    else
-                    {
-                        if(first + length > CAPTURE_BUFFER_SIZE)
-                        {
-                            cdc_transfer(buffer + first, CAPTURE_BUFFER_SIZE - first);
-                            cdc_transfer(buffer, (first + length) - CAPTURE_BUFFER_SIZE);
-                        }
-                        else
-                            cdc_transfer(buffer + first, length);
-
-                        cdc_transfer(&stampsLength, 1);
-
-                        if(stampsLength > 1)
-                            cdc_transfer((unsigned char*)timestamps, stampsLength * 4);
-                    }
-                #else
-
+                //Send the samples
+                if(dataFromWiFi)
+                {
                     if(first + length > CAPTURE_BUFFER_SIZE)
                     {
-                        cdc_transfer(buffer + first, CAPTURE_BUFFER_SIZE - first);
-                        cdc_transfer(buffer, (first + length) - CAPTURE_BUFFER_SIZE);
+                        wifi_transfer(buffer + first, CAPTURE_BUFFER_SIZE - first);
+                        wifi_transfer(buffer, (first + length) - CAPTURE_BUFFER_SIZE);
                     }
                     else
-                        cdc_transfer(buffer + first, length);
+                        wifi_transfer(buffer + first, length);
 
-                    cdc_transfer(&stampsLength, 1);
-                        
+                    wifi_transfer(&stampsLength, 1);
+
                     if(stampsLength > 1)
-                        cdc_transfer((unsigned char*)timestamps, stampsLength * 4);
+                        wifi_transfer((unsigned char*)timestamps, stampsLength * 4);
+                }
+                else
+                {
+                    if(first + length > CAPTURE_BUFFER_SIZE)
+                    {
+                        usb_bulk_transfer_blocking(buffer + first, CAPTURE_BUFFER_SIZE - first);
+                        usb_bulk_transfer_blocking(buffer, (first + length) - CAPTURE_BUFFER_SIZE);
+                    }
+                    else
+                        usb_bulk_transfer_blocking(buffer + first, length);
 
-                #endif
+                    usb_bulk_transfer_blocking(&stampsLength, 1);
+
+                    if(stampsLength > 1)
+                        usb_bulk_transfer_blocking((unsigned char*)timestamps, stampsLength * 4);
+                }
+
                 //Done!
                 capturing = false;
             }
@@ -912,6 +723,14 @@ int main()
                     capturing = false;
                     LED_ON();
                 }
+                //Detect USB disconnect during capture wait (via Core 1 events)
+                else if(!dataFromWiFi && !usbConnected)
+                {
+                    StopCapture();
+                    capturing = false;
+                    bufferPos = 0;
+                    LED_ON();
+                }
                 else
                 {
                     LED_ON();
@@ -922,9 +741,21 @@ int main()
                 }
             }
         }
-        else if(previewing)
+        else if(streaming_active)
         {
-            runPreview();
+            /* Core 0: compress DMA data into compressed ring buffer.
+             * Core 1 transmits from the compressed ring in parallel. */
+            RunCompressionLoop();
+
+            /* Wait for Core 1 to finish draining + sending EOF */
+            while (stream_transmit_active)
+            {
+                /* Keep processing input events so stop commands arrive */
+                processInput();
+                tight_loop_contents();
+            }
+            CleanupStream();
+            streaming_active = false;
         }
         else
         {

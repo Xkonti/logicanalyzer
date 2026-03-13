@@ -1,0 +1,565 @@
+/*
+ * stream_compress_minimal.c
+ *
+ * Nibble-based stream compression for RP2350 logic analyzer.
+ * Runs on Core 1 (Cortex-M33 @ 150-200MHz). Every cycle matters.
+ *
+ * Data flow:
+ *   PIO -> DMA ping-pong buffers -> bit-transpose -> per-channel encode -> USB
+ *
+ * A "chunk" is 256 samples. In 8-channel mode, that's 256 bytes of
+ * interleaved GPIO state. We bit-transpose into per-channel bitstreams
+ * (32 bytes = 256 bits each), then compress each channel independently.
+ *
+ * KEY OPTIMIZATION DECISIONS:
+ *
+ * 1. BIT TRANSPOSE via 8x8 delta-swap kernel (~30 ALU ops per 8x8 block,
+ *    zero data memory). 32 invocations cover 256 samples. LUT alternative
+ *    would thrash the M33's small D-cache.
+ *
+ * 2. ALL-ZEROS/ALL-ONES via OR/AND-reduce of 8 uint32s (~25 ALU ops).
+ *    Catches idle channels for free, saving 32 bytes per channel.
+ *
+ * 3. NIBBLE ENCODING with early bail: if encoded output exceeds 32 bytes
+ *    at any point, abandon immediately and use raw. Greedy longest-first
+ *    matching trades ~1-2% compression for significant branch savings.
+ *
+ * 4. BIT ACCUMULATOR: output nibbles packed into a 32-bit register,
+ *    flushed as full bytes. Minimizes store instructions.
+ *
+ * 5. Pre-unpacked nibble array: 64 bytes on stack saves a shift+mask per
+ *    nibble access in the encoding inner loop (~128 ops saved).
+ *
+ * 6. No malloc, no function pointers, no indirect jumps. Everything is
+ *    static/inline or stack-local so the compiler sees the full picture.
+ */
+
+#include <stdint.h>
+#include <string.h>
+
+/* ========================================================================= */
+/* Constants                                                                  */
+/* ========================================================================= */
+
+#define CHUNK_SAMPLES     256
+#define CHUNK_NIBBLES     64    /* 256 bits / 4 bits per nibble */
+#define CHANNEL_BYTES     32    /* 256 bits / 8 bits per byte */
+
+/* Header encoding (2 bits per channel) */
+#define HDR_RAW           0x00
+#define HDR_ALL_ZERO      0x01
+#define HDR_ALL_ONE       0x02
+#define HDR_NIBBLE_ENC    0x03
+
+/* Nibble prefix codes */
+#define NPC_RAW1          0x0   /* next 1 nibble is raw */
+#define NPC_RAW2          0x1   /* next 2 nibbles are raw */
+#define NPC_RAW3          0x2   /* next 3 nibbles are raw */
+#define NPC_RAW6          0x3   /* next 6 nibbles are raw */
+#define NPC_RAW4          0x4   /* next 4 nibbles are raw */
+#define NPC_RAW8          0x5   /* next 8 nibbles are raw */
+#define NPC_ZERO2         0x6
+#define NPC_ZERO4         0x7
+#define NPC_ZERO8         0x8
+#define NPC_ZERO16        0x9
+#define NPC_ZERO32        0xA
+#define NPC_ONE2          0xB
+#define NPC_ONE4          0xC
+#define NPC_ONE8          0xD
+#define NPC_ONE16         0xE
+#define NPC_ONE32         0xF
+
+/* ========================================================================= */
+/* Bit Accumulator                                                            */
+/* ========================================================================= */
+
+/*
+ * Accumulates output nibbles MSB-first into a 32-bit register, flushing
+ * complete bytes. On M33 the shift+or is single-cycle; the conditional
+ * flush branch is well-predicted (alternates taken/not-taken).
+ */
+typedef struct {
+    uint8_t *buf;
+    uint32_t accum;     /* bit accumulator */
+    uint32_t bits;      /* valid bits in accum, 0..7 */
+    uint32_t pos;       /* byte write position */
+} bit_writer_t;
+
+static inline void bw_init(bit_writer_t *bw, uint8_t *out) {
+    bw->buf = out;
+    bw->accum = 0;
+    bw->bits = 0;
+    bw->pos = 0;
+}
+
+static inline void bw_put4(bit_writer_t *bw, uint32_t nibble) {
+    bw->accum = (bw->accum << 4) | (nibble & 0xF);
+    bw->bits += 4;
+    if (bw->bits >= 8) {
+        bw->bits -= 8;
+        bw->buf[bw->pos++] = (uint8_t)(bw->accum >> bw->bits);
+        /*
+         * No mask needed on accum: residual low bits are garbage that gets
+         * shifted out on next flush. Saves an AND instruction per call.
+         */
+    }
+}
+
+static inline void bw_flush(bit_writer_t *bw) {
+    if (bw->bits > 0) {
+        bw->buf[bw->pos++] = (uint8_t)(bw->accum << (8 - bw->bits));
+        bw->bits = 0;
+    }
+}
+
+/* ========================================================================= */
+/* 8x8 Bit Matrix Transpose                                                   */
+/* ========================================================================= */
+
+/*
+ * Transposes an 8x8 bit matrix: 8 input bytes (rows = samples) become
+ * 8 output bytes (columns = channels).
+ *
+ * Uses three rounds of delta-swap from Hacker's Delight (2nd ed, section 7-3),
+ * adapted for two 32-bit words (the original works on a single 64-bit value).
+ * Total: ~25 ALU instructions for the swap rounds, zero data memory.
+ *
+ * Input:  src[i*stride] = sample i, each bit = one channel (bit 0 = ch 0).
+ * Output: out[ch] = 8-bit sample history for channel ch (bit k = sample k).
+ */
+static inline void transpose8x8(const uint8_t *src, uint32_t stride,
+                                 uint8_t out[8]) {
+    /* Pack rows 0-3 into lo (row0 at bits 7:0), rows 4-7 into hi */
+    uint32_t lo = ((uint32_t)src[3 * stride] << 24) |
+                  ((uint32_t)src[2 * stride] << 16) |
+                  ((uint32_t)src[1 * stride] <<  8) |
+                  ((uint32_t)src[0 * stride]);
+
+    uint32_t hi = ((uint32_t)src[7 * stride] << 24) |
+                  ((uint32_t)src[6 * stride] << 16) |
+                  ((uint32_t)src[5 * stride] <<  8) |
+                  ((uint32_t)src[4 * stride]);
+
+    uint32_t t;
+
+    /*
+     * Three rounds of delta-swap implementing the 64-bit transpose from
+     * Hacker's Delight section 7-3, split across two 32-bit words.
+     *
+     * delta_swap(x, mask, shift): t = ((x >> shift) ^ x) & mask;
+     *                             x ^= t; x ^= (t << shift);
+     *
+     * Step 1: distance=7, mask=0x00AA00AA -- transpose 2x2 bit blocks
+     * within each 32-bit word (each word has 4 rows of 8 bits).
+     */
+    t = ((lo >> 7) ^ lo) & 0x00AA00AA;
+    lo ^= t; lo ^= (t << 7);
+    t = ((hi >> 7) ^ hi) & 0x00AA00AA;
+    hi ^= t; hi ^= (t << 7);
+
+    /* Step 2: distance=14, mask=0x0000CCCC -- transpose 4x4 blocks */
+    t = ((lo >> 14) ^ lo) & 0x0000CCCC;
+    lo ^= t; lo ^= (t << 14);
+    t = ((hi >> 14) ^ hi) & 0x0000CCCC;
+    hi ^= t; hi ^= (t << 14);
+
+    /*
+     * Step 3: distance=28, mask=0xF0F0F0F0 -- cross-word swap.
+     * In 64-bit: (x >> 28) spans the word boundary.
+     * Split implementation: (x>>28) low word = (hi << 4) | (lo >> 28).
+     * The mask applies to the low word only; the correction to hi is
+     * the same bits shifted back (t >> 4 maps bit positions correctly).
+     */
+    t = (((hi << 4) | (lo >> 28)) ^ lo) & 0xF0F0F0F0;
+    lo ^= t;
+    hi ^= (t >> 4);
+
+    /* Extract: ch 0..3 from lo (LSB-first), ch 4..7 from hi */
+    out[0] = (uint8_t)(lo);
+    out[1] = (uint8_t)(lo >>  8);
+    out[2] = (uint8_t)(lo >> 16);
+    out[3] = (uint8_t)(lo >> 24);
+    out[4] = (uint8_t)(hi);
+    out[5] = (uint8_t)(hi >>  8);
+    out[6] = (uint8_t)(hi >> 16);
+    out[7] = (uint8_t)(hi >> 24);
+}
+
+/* ========================================================================= */
+/* Full Chunk Transpose (256 samples)                                         */
+/* ========================================================================= */
+
+/*
+ * All three variants (8/16/24-ch) invoke the same 8x8 kernel 32 times
+ * (256 samples / 8 = 32 groups). For multi-byte modes, separate byte
+ * groups handle different 8-channel slices. Stride parameter skips
+ * interleaved bytes belonging to other channel groups.
+ *
+ * Per-channel output: channel_data[ch][0..31], 32 bytes = 256 bits.
+ * byte 0 contains sample bits 0..7, byte 31 contains sample bits 248..255.
+ */
+
+static void transpose_chunk_8ch(const uint8_t *samples,
+                                uint8_t channel_data[8][CHANNEL_BYTES]) {
+    for (uint32_t g = 0; g < 32; g++) {
+        uint8_t tr[8];
+        transpose8x8(&samples[g * 8], 1, tr);
+        /* Scatter one byte per channel. Sequential writes within each
+         * channel row give good spatial locality for the encoder. */
+        channel_data[0][g] = tr[0]; channel_data[1][g] = tr[1];
+        channel_data[2][g] = tr[2]; channel_data[3][g] = tr[3];
+        channel_data[4][g] = tr[4]; channel_data[5][g] = tr[5];
+        channel_data[6][g] = tr[6]; channel_data[7][g] = tr[7];
+    }
+}
+
+static void transpose_chunk_16ch(const uint8_t *samples,
+                                 uint8_t channel_data[16][CHANNEL_BYTES]) {
+    /*
+     * DMA_SIZE_16: each sample = 2 bytes (little-endian).
+     * Byte 0: channels 0-7.  Byte 1: channels 8-15.
+     * Stride between samples = 2.
+     */
+    for (uint32_t g = 0; g < 32; g++) {
+        const uint8_t *base = &samples[g * 16]; /* 8 samples * 2 bytes */
+        uint8_t tr[8];
+
+        transpose8x8(base, 2, tr); /* low byte: ch 0-7 */
+        channel_data[0][g] = tr[0]; channel_data[1][g] = tr[1];
+        channel_data[2][g] = tr[2]; channel_data[3][g] = tr[3];
+        channel_data[4][g] = tr[4]; channel_data[5][g] = tr[5];
+        channel_data[6][g] = tr[6]; channel_data[7][g] = tr[7];
+
+        transpose8x8(base + 1, 2, tr); /* high byte: ch 8-15 */
+        channel_data[8][g]  = tr[0]; channel_data[9][g]  = tr[1];
+        channel_data[10][g] = tr[2]; channel_data[11][g] = tr[3];
+        channel_data[12][g] = tr[4]; channel_data[13][g] = tr[5];
+        channel_data[14][g] = tr[6]; channel_data[15][g] = tr[7];
+    }
+}
+
+static void transpose_chunk_24ch(const uint8_t *samples,
+                                 uint8_t channel_data[24][CHANNEL_BYTES]) {
+    /*
+     * DMA_SIZE_32: each sample = 4 bytes (little-endian).
+     * Byte 0: ch 0-7.  Byte 1: ch 8-15.  Byte 2: ch 16-23.  Byte 3: unused.
+     * Stride between samples = 4.
+     */
+    for (uint32_t g = 0; g < 32; g++) {
+        const uint8_t *base = &samples[g * 32]; /* 8 samples * 4 bytes */
+        uint8_t tr[8];
+
+        transpose8x8(base, 4, tr); /* byte 0: ch 0-7 */
+        channel_data[0][g] = tr[0]; channel_data[1][g] = tr[1];
+        channel_data[2][g] = tr[2]; channel_data[3][g] = tr[3];
+        channel_data[4][g] = tr[4]; channel_data[5][g] = tr[5];
+        channel_data[6][g] = tr[6]; channel_data[7][g] = tr[7];
+
+        transpose8x8(base + 1, 4, tr); /* byte 1: ch 8-15 */
+        channel_data[8][g]  = tr[0]; channel_data[9][g]  = tr[1];
+        channel_data[10][g] = tr[2]; channel_data[11][g] = tr[3];
+        channel_data[12][g] = tr[4]; channel_data[13][g] = tr[5];
+        channel_data[14][g] = tr[6]; channel_data[15][g] = tr[7];
+
+        transpose8x8(base + 2, 4, tr); /* byte 2: ch 16-23 */
+        channel_data[16][g] = tr[0]; channel_data[17][g] = tr[1];
+        channel_data[18][g] = tr[2]; channel_data[19][g] = tr[3];
+        channel_data[20][g] = tr[4]; channel_data[21][g] = tr[5];
+        channel_data[22][g] = tr[6]; channel_data[23][g] = tr[7];
+    }
+}
+
+/* ========================================================================= */
+/* Nibble-Encode One Channel                                                  */
+/* ========================================================================= */
+
+/*
+ * Encodes 32 bytes (64 nibbles) of one channel's bitstream using the
+ * prefix code scheme. Returns output byte count, or 0 if encoding is
+ * not beneficial (caller should use raw mode).
+ *
+ * Strategy: left-to-right greedy scan.
+ *   1. At each position, check if current nibble is 0x0 or 0xF.
+ *      If so, count run length and emit the largest power-of-2 code.
+ *   2. Otherwise, scan ahead for the next run-start and emit the
+ *      largest raw-group code that fits.
+ *   3. Early bail if output exceeds 32 bytes at any point.
+ *
+ * The run-length cascade (32->16->8->4->2) typically hits at the first
+ * level for idle signals. Each miss is a single not-taken branch (~1 cycle
+ * on M33 with correct prediction).
+ */
+static uint32_t nibble_encode_channel(const uint8_t *channel_bytes,
+                                      uint8_t *out) {
+    /*
+     * Pre-unpack 32 bytes into 64 nibbles. Costs ~160 instructions but
+     * saves a shift+mask on every subsequent nibble access (~2 per nibble
+     * in the encoder = ~128 saved ops). Net win for any non-trivial input.
+     */
+    uint8_t nibbles[CHUNK_NIBBLES];
+    for (uint32_t i = 0; i < CHANNEL_BYTES; i++) {
+        uint32_t byte = channel_bytes[i];
+        nibbles[i * 2]     = byte >> 4;
+        nibbles[i * 2 + 1] = byte & 0xF;
+    }
+
+    bit_writer_t bw;
+    bw_init(&bw, out);
+
+    uint32_t pos = 0;
+
+    while (pos < CHUNK_NIBBLES) {
+        uint32_t remaining = CHUNK_NIBBLES - pos;
+        uint32_t nib = nibbles[pos];
+
+        if (nib == 0x0 || nib == 0xF) {
+            /*
+             * Run of 0x0 or 0xF. Count consecutive matching nibbles, up to 32.
+             * The while loop body is tiny (load, compare, increment) so the
+             * branch predictor handles it well for both short and long runs.
+             */
+            uint32_t max_run = remaining < 32 ? remaining : 32;
+            uint32_t run = 1;
+            while (run < max_run && nibbles[pos + run] == nib)
+                run++;
+
+            /*
+             * Emit largest fitting code. base_code is NPC_ZERO2 (0x6) for
+             * 0x0 runs, NPC_ONE2 (0xB) for 0xF runs. Codes for 2,4,8,16,32
+             * are base+0, base+1, base+2, base+3, base+4 respectively.
+             *
+             * Cascade from 32 down. Each not-taken branch is ~1 cycle.
+             */
+            uint32_t base_code = (nib == 0x0) ? NPC_ZERO2 : NPC_ONE2;
+
+            if (run >= 32) {
+                bw_put4(&bw, base_code + 4); pos += 32;
+            } else if (run >= 16) {
+                bw_put4(&bw, base_code + 3); pos += 16;
+            } else if (run >= 8) {
+                bw_put4(&bw, base_code + 2); pos += 8;
+            } else if (run >= 4) {
+                bw_put4(&bw, base_code + 1); pos += 4;
+            } else if (run >= 2) {
+                bw_put4(&bw, base_code);     pos += 2;
+            } else {
+                /* Single 0x0 or 0xF: emit as RAW1 (prefix + 1 data nibble) */
+                bw_put4(&bw, NPC_RAW1);
+                bw_put4(&bw, nib);
+                pos += 1;
+            }
+        } else {
+            /*
+             * Non-run region. Scan ahead (up to 8 nibbles) to find where the
+             * next compressible run of 0x0/0xF (length >= 2) starts. Everything
+             * before that goes as raw.
+             *
+             * We stop extending the raw block if the next nibble could begin
+             * a run (is 0x0 or 0xF AND followed by another identical nibble).
+             * This lets the next iteration pick up the run code.
+             */
+            uint32_t max_look = remaining < 8 ? remaining : 8;
+            uint32_t raw_count = 1;
+
+            while (raw_count < max_look) {
+                uint32_t next = nibbles[pos + raw_count];
+                if ((next == 0x0 || next == 0xF) &&
+                    (pos + raw_count + 1 < CHUNK_NIBBLES) &&
+                    nibbles[pos + raw_count + 1] == next) {
+                    break;
+                }
+                raw_count++;
+            }
+
+            /*
+             * Emit the largest raw-group code that fits. Available sizes:
+             * 8, 6, 4, 3, 2, 1. If raw_count > emit, the remainder is
+             * handled on the next loop iteration.
+             *
+             * Greedy largest-first: simpler than optimal grouping and only
+             * ~1-2% worse compression. For raw_count=7, we emit RAW4 now
+             * and RAW3 next iteration (9 prefix nibbles total), vs optimal
+             * RAW6+RAW1 (8 prefix nibbles). The saved branching logic is
+             * worth the extra nibble.
+             */
+            uint32_t emit, prefix;
+
+            if      (raw_count >= 8) { prefix = NPC_RAW8; emit = 8; }
+            else if (raw_count >= 6) { prefix = NPC_RAW6; emit = 6; }
+            else if (raw_count >= 4) { prefix = NPC_RAW4; emit = 4; }
+            else if (raw_count >= 3) { prefix = NPC_RAW3; emit = 3; }
+            else if (raw_count >= 2) { prefix = NPC_RAW2; emit = 2; }
+            else                     { prefix = NPC_RAW1; emit = 1; }
+
+            bw_put4(&bw, prefix);
+            for (uint32_t i = 0; i < emit; i++)
+                bw_put4(&bw, nibbles[pos + i]);
+            pos += emit;
+        }
+
+        /*
+         * Early bail: if output already exceeds raw size (32 bytes),
+         * encoding is pointless. This check is ~3 instructions and the
+         * branch is rarely taken (well-predicted not-taken).
+         */
+        if (bw.pos > CHANNEL_BYTES) {
+            return 0;
+        }
+    }
+
+    bw_flush(&bw);
+
+    /* Strict >=: encoding must actually save space to justify decode cost */
+    if (bw.pos >= CHANNEL_BYTES) {
+        return 0;
+    }
+
+    return bw.pos;
+}
+
+/* ========================================================================= */
+/* Compress One 256-Sample Chunk                                              */
+/* ========================================================================= */
+
+/*
+ * Main entry point, called from Core 1 after DMA buffer completion.
+ *
+ * Parameters:
+ *   samples      - 256 interleaved samples from DMA buffer
+ *   num_channels - 8, 16, or 24
+ *   out          - output buffer (worst case: ceil(N/4) + N*32 bytes)
+ *
+ * Returns: bytes written to out.
+ *
+ * Output format:
+ *   [header: ceil(num_channels/4) bytes, 2 bits per channel, MSB-first]
+ *   [channel 0 data: raw (32B) / encoded / nothing]
+ *   [channel 1 data: ...]
+ *   ...
+ */
+uint32_t stream_compress_chunk(const uint8_t *samples,
+                               uint32_t num_channels,
+                               uint8_t *out) {
+    /*
+     * Stack: up to 24*32 = 768 bytes for channel data.
+     * M33 stack is typically 4-8KB, well within budget.
+     */
+    uint8_t channel_data[24][CHANNEL_BYTES];
+
+    /* Bit-transpose: dispatch by mode for best inlining */
+    if (num_channels <= 8)
+        transpose_chunk_8ch(samples, channel_data);
+    else if (num_channels <= 16)
+        transpose_chunk_16ch(samples, channel_data);
+    else
+        transpose_chunk_24ch(samples, channel_data);
+
+    /* Header + per-channel encoding */
+    uint32_t header_bytes = (num_channels + 3) >> 2;
+    uint32_t data_pos = header_bytes; /* data starts after header */
+    uint8_t header_accum = 0;
+    uint8_t encode_buf[CHANNEL_BYTES + 4]; /* +4 safety for partial byte */
+
+    for (uint32_t ch = 0; ch < num_channels; ch++) {
+        uint32_t ch_in_group = ch & 3;
+        uint32_t mode;
+
+        /*
+         * All-zeros / all-ones check via OR-reduce and AND-reduce of 8 words.
+         * Cost: 8 word loads (may be cached from transpose), 7 ORs, 7 ANDs,
+         * 2 compares = ~25 instructions. Extremely cheap, catches the very
+         * common idle-channel case.
+         */
+        const uint32_t *w = (const uint32_t *)channel_data[ch];
+        uint32_t or_all  = w[0] | w[1] | w[2] | w[3] |
+                           w[4] | w[5] | w[6] | w[7];
+        uint32_t and_all = w[0] & w[1] & w[2] & w[3] &
+                           w[4] & w[5] & w[6] & w[7];
+
+        if (or_all == 0) {
+            mode = HDR_ALL_ZERO;
+        } else if (and_all == 0xFFFFFFFF) {
+            mode = HDR_ALL_ONE;
+        } else {
+            uint32_t enc_size = nibble_encode_channel(channel_data[ch],
+                                                      encode_buf);
+            if (enc_size > 0) {
+                mode = HDR_NIBBLE_ENC;
+                memcpy(&out[data_pos], encode_buf, enc_size);
+                data_pos += enc_size;
+            } else {
+                mode = HDR_RAW;
+                memcpy(&out[data_pos], channel_data[ch], CHANNEL_BYTES);
+                data_pos += CHANNEL_BYTES;
+            }
+        }
+
+        /*
+         * Pack header MSB-first: channel 0 in bits 7:6, channel 1 in 5:4, etc.
+         * Write the header byte once every 4 channels.
+         */
+        header_accum |= (uint8_t)(mode << (6 - ch_in_group * 2));
+
+        if (ch_in_group == 3) {
+            out[ch >> 2] = header_accum;
+            header_accum = 0;
+        }
+    }
+
+    /* Write trailing partial header byte (unused slots remain 0 = HDR_RAW,
+     * but the decoder knows num_channels and won't read phantom channels) */
+    if (num_channels & 3) {
+        out[num_channels >> 2] = header_accum;
+    }
+
+    return data_pos;
+}
+
+/* ========================================================================= */
+/* Process Entire DMA Buffer                                                  */
+/* ========================================================================= */
+
+/*
+ * Compresses all 256-sample chunks in a completed DMA buffer.
+ *
+ * Parameters:
+ *   dma_buf      - completed DMA ping-pong buffer
+ *   dma_buf_size - buffer size in bytes
+ *   num_channels - 8, 16, or 24
+ *   out          - output buffer for compressed stream
+ *   out_capacity - output buffer size
+ *
+ * Returns: total bytes written, or 0 on output overflow.
+ *
+ * Output is concatenated chunk packets (no framing between them).
+ * The decoder knows each chunk = 256 samples.
+ */
+uint32_t stream_compress_buffer(const uint8_t *dma_buf,
+                                uint32_t dma_buf_size,
+                                uint32_t num_channels,
+                                uint8_t *out,
+                                uint32_t out_capacity) {
+    uint32_t bytes_per_sample;
+    if      (num_channels <= 8)  bytes_per_sample = 1;
+    else if (num_channels <= 16) bytes_per_sample = 2;
+    else                         bytes_per_sample = 4;
+
+    uint32_t chunk_input_bytes = CHUNK_SAMPLES * bytes_per_sample;
+    uint32_t num_chunks = dma_buf_size / chunk_input_bytes;
+    uint32_t total_out = 0;
+
+    /* Worst-case output per chunk: header + all channels raw */
+    uint32_t worst_case = ((num_channels + 3) >> 2) +
+                          num_channels * CHANNEL_BYTES;
+
+    for (uint32_t i = 0; i < num_chunks; i++) {
+        if (total_out + worst_case > out_capacity)
+            return 0; /* overflow */
+
+        uint32_t chunk_out = stream_compress_chunk(
+            &dma_buf[i * chunk_input_bytes], num_channels, &out[total_out]);
+        total_out += chunk_out;
+    }
+
+    return total_out;
+}

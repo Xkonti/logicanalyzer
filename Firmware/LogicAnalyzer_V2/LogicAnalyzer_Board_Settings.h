@@ -99,7 +99,7 @@
             #define MAX_FREQ 100000000
             #define MAX_BLAST_FREQ 200000000
         #endif
-        #define CAPTURE_BUFFER_SIZE (128 * 3 * 1024)
+        #define CAPTURE_BUFFER_SIZE (448 * 1024)
         #define MAX_CHANNELS 24
 
     #elif defined (BUILD_PICO_W)
@@ -144,7 +144,7 @@
 
         #define MAX_FREQ 100000000
         #define MAX_BLAST_FREQ 200000000
-        #define CAPTURE_BUFFER_SIZE (128 * 3 * 1024)
+        #define CAPTURE_BUFFER_SIZE (448 * 1024)
         #define MAX_CHANNELS 24
 
     #elif defined (BUILD_PICO_2_W_WIFI)
@@ -159,7 +159,7 @@
         #define PIN_MAP {2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,26,27,28,COMPLEX_TRIGGER_IN_PIN}
         #define MAX_FREQ 100000000
         #define MAX_BLAST_FREQ 200000000
-        #define CAPTURE_BUFFER_SIZE (128 * 3 * 1024)
+        #define CAPTURE_BUFFER_SIZE (448 * 1024)
         #define MAX_CHANNELS 24
 
     #elif defined (BUILD_ZERO)

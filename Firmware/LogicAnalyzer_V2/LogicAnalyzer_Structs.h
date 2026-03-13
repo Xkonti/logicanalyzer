@@ -41,22 +41,20 @@
 
     }CAPTURE_REQUEST;
 
-    //Preview request issued by the host computer for real-time pin monitoring
-    typedef struct _PREVIEW_REQUEST
+    //Stream request issued by the host computer for real-time compressed streaming
+    typedef struct _STREAM_REQUEST
     {
-        //Channels to monitor
+        //Channels to capture
         uint8_t channels[32];
-        //Microseconds between sample batches
-        uint32_t intervalUs;
         //Number of channels (1-24)
         uint8_t channelCount;
-        //GPIO reads per batch (1-16)
-        uint8_t samplesPerInterval;
-    } PREVIEW_REQUEST;
+        //Chunk size in samples (32-1024, must be multiple of 32)
+        uint16_t chunkSamples;
+        //Sampling frequency in Hz
+        uint32_t frequency;
+    } STREAM_REQUEST;
 
-    #ifdef USE_CYGW_WIFI
-
-        typedef struct _WIFI_SETTINGS
+    typedef struct _WIFI_SETTINGS
         {
             char apName[33];
             char passwd[64];
@@ -120,6 +118,49 @@
 
         } POWER_STATUS;
 
-    #endif
+        /* ---- USB event types (Core 1 → Core 0) ---- */
+
+        typedef enum
+        {
+            USB_DATA_RECEIVED,
+            USB_CONNECTED,
+            USB_DISCONNECTED
+
+        } USB_EVENT;
+
+        typedef struct _EVENT_FROM_USB
+        {
+            USB_EVENT event;
+            char data[128];
+            uint8_t dataLength;
+
+        } EVENT_FROM_USB;
+
+        /* ---- USB send types (Core 0 → Core 1) ---- */
+
+        typedef enum
+        {
+            USB_SEND_DATA
+
+        } FRONTEND_USB_EVENT;
+
+        typedef struct _EVENT_TO_USB
+        {
+            FRONTEND_USB_EVENT event;
+            char data[32];
+            uint8_t dataLength;
+
+        } EVENT_TO_USB;
+
+        /* ---- Bulk transfer descriptor (Core 0 → Core 1, for capture data) ---- */
+
+        typedef struct _USB_BULK_TRANSFER
+        {
+            const uint8_t* data;
+            uint32_t length;
+            volatile bool pending;
+            volatile bool complete;
+
+    } USB_BULK_TRANSFER;
 
 #endif

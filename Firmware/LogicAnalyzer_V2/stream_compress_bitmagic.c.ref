@@ -1,0 +1,1463 @@
+/**
+ * stream_compress_bitmagic.c — Nibble-Based Stream Compression for RP2350
+ * ========================================================================
+ *
+ * This file implements a high-performance, real-time compression pipeline for
+ * a logic analyzer running on the Raspberry Pi Pico 2 (RP2350, Cortex-M33).
+ * Core 1 runs this compression while Core 0 handles USB CDC commands.
+ *
+ * Design philosophy: every cycle counts. We use:
+ *   - Pre-computed lookup tables (LUTs) sized for L1 cache residency
+ *   - SWAR (SIMD Within A Register) for parallel bit manipulation
+ *   - Branchless selection via arithmetic masks
+ *   - Bit-parallel transpose using the classic log2(N)-step butterfly
+ *   - Run-length detection via CLZ/CTZ intrinsics (single-cycle on M33)
+ *   - Nibble classification via a 256-entry LUT (fits in 256 bytes)
+ *
+ * Data flow:
+ *   DMA buffer (256 interleaved samples)
+ *     -> bit-transpose (extract per-channel bitstreams)
+ *       -> per-channel classification (all-0, all-1, mixed)
+ *         -> nibble encoding (RLE + raw prefix codes)
+ *           -> packed output buffer for USB CDC
+ *
+ * Compression format: see header comment at each section.
+ *
+ * Author: Generated for the LogicAnalyzer project
+ * Target: RP2350 (Cortex-M33, Thumb-2, single-cycle CLZ)
+ * License: Same as parent project
+ */
+
+#include "LogicAnalyzer_Board_Settings.h"
+#include "LogicAnalyzer_Capture.h"
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+/* =========================================================================
+ * SECTION 0: COMPILE-TIME CONSTANTS & CONFIGURATION
+ * =========================================================================
+ * CHUNK_SAMPLES = 256: the number of samples per compression chunk.
+ * Each channel produces 256 bits = 32 bytes = 64 nibbles per chunk.
+ */
+
+#define CHUNK_SAMPLES      256
+#define CHUNK_BYTES        (CHUNK_SAMPLES / 8)   /* 32 bytes per channel */
+#define CHUNK_NIBBLES      (CHUNK_SAMPLES / 4)   /* 64 nibbles per channel */
+#define CHUNK_WORDS        (CHUNK_BYTES / 4)     /* 8 uint32_t per channel */
+
+/* Maximum channels we support (matches board config) */
+#define MAX_COMPRESS_CH    MAX_CHANNELS
+
+/* Header encoding: 2 bits per channel, packed 4 channels per byte */
+#define HDR_RAW            0x00   /* 00: raw 32 bytes follow */
+#define HDR_ALL_ZERO       0x01   /* 01: all zeros, no data */
+#define HDR_ALL_ONE        0x02   /* 10: all ones, no data */
+#define HDR_NIBBLE_ENC     0x03   /* 11: nibble-encoded data follows */
+
+/* Nibble prefix codes (4-bit values written to the output stream) */
+#define NPC_RAW_1          0x0    /* next 1 nibble is raw */
+#define NPC_RAW_2          0x1    /* next 2 nibbles are raw */
+#define NPC_RAW_3          0x2    /* next 3 nibbles are raw */
+#define NPC_RAW_6          0x3    /* next 6 nibbles are raw (fills gap) */
+#define NPC_RAW_4          0x4    /* next 4 nibbles are raw */
+#define NPC_RAW_8          0x5    /* next 8 nibbles are raw */
+#define NPC_ZERO_2         0x6    /* next 2 nibbles are 0x0 */
+#define NPC_ZERO_4         0x7    /* next 4 nibbles are 0x0 */
+#define NPC_ZERO_8         0x8    /* next 8 nibbles are 0x0 */
+#define NPC_ZERO_16        0x9    /* next 16 nibbles are 0x0 */
+#define NPC_ZERO_32        0xA    /* next 32 nibbles are 0x0 */
+#define NPC_ONE_2          0xB    /* next 2 nibbles are 0xF */
+#define NPC_ONE_4          0xC    /* next 4 nibbles are 0xF */
+#define NPC_ONE_8          0xD    /* next 8 nibbles are 0xF */
+#define NPC_ONE_16         0xE    /* next 16 nibbles are 0xF */
+#define NPC_ONE_32         0xF    /* next 32 nibbles are 0xF */
+
+
+/* =========================================================================
+ * SECTION 1: LOOKUP TABLES — The Heart of the Trick
+ * =========================================================================
+ *
+ * LUT philosophy on Cortex-M33:
+ *   - L1 data cache is absent on RP2350 (it's a cacheless core for
+ *     deterministic timing), but the bus fabric is fast for SRAM access.
+ *   - Small LUTs (256 bytes) fit in a single SRAM bank and the bus
+ *     prefetcher handles sequential access well.
+ *   - A 256-byte LUT replaces a cascade of branches with a single
+ *     indexed load (LDR r, [base, offset]) — 2 cycles vs 5-12 cycles
+ *     for a branch chain.
+ *
+ * nibble_class_lut[byte]:
+ *   For each possible byte value (representing 2 nibbles), classifies
+ *   the LOW nibble into one of:
+ *     0 = mixed (raw data)
+ *     1 = all-zero nibble (0x0)
+ *     2 = all-one nibble (0xF)
+ *   Only the low nibble of the input byte matters; caller shifts for high.
+ *   This avoids per-nibble branching during run detection.
+ */
+static const uint8_t nibble_class_lut[16] = {
+    /* 0x0 */ 1,  /* all zeros */
+    /* 0x1 */ 0,  /* mixed */
+    /* 0x2 */ 0,
+    /* 0x3 */ 0,
+    /* 0x4 */ 0,
+    /* 0x5 */ 0,
+    /* 0x6 */ 0,
+    /* 0x7 */ 0,
+    /* 0x8 */ 0,
+    /* 0x9 */ 0,
+    /* 0xA */ 0,
+    /* 0xB */ 0,
+    /* 0xC */ 0,
+    /* 0xD */ 0,
+    /* 0xE */ 0,
+    /* 0xF */ 2   /* all ones */
+};
+
+/*
+ * run_length_to_code[]:
+ *   Maps a run length (in nibbles) of zeros or ones to the best prefix
+ *   code and the number of nibbles that code actually consumes.
+ *   We use a greedy approach: always emit the largest run code that fits.
+ *
+ *   For zeros: run of 2->0x6, 4->0x7, 8->0x8, 16->0x9, 32->0xA
+ *   For ones:  run of 2->0xB, 4->0xC, 8->0xD, 16->0xE, 32->0xF
+ *
+ *   The greedy decoder table: given a run length >= N, what's the biggest
+ *   code we can emit?
+ */
+
+/* Thresholds for run encoding (must match in order: largest first) */
+static const uint8_t run_thresholds[]   = { 32, 16, 8, 4, 2 };
+static const uint8_t zero_run_codes[]   = { NPC_ZERO_32, NPC_ZERO_16, NPC_ZERO_8, NPC_ZERO_4, NPC_ZERO_2 };
+static const uint8_t one_run_codes[]    = { NPC_ONE_32,  NPC_ONE_16,  NPC_ONE_8,  NPC_ONE_4,  NPC_ONE_2  };
+#define NUM_RUN_THRESHOLDS 5
+
+/*
+ * raw_length_to_code[]:
+ *   Maps a count of raw nibbles (1..8) to the appropriate prefix code.
+ *   The raw prefix codes are:
+ *     1->0x0, 2->0x1, 3->0x2, 4->0x4, 6->0x3, 8->0x5
+ *   Note the non-monotonic mapping (6 uses code 0x3, 4 uses code 0x4).
+ *   Index 0 is unused (no zero-length raw run).
+ *
+ *   We use a direct-indexed LUT to avoid any branching on the raw count.
+ */
+static const uint8_t raw_len_to_code[9] = {
+    /* 0 */ 0xFF,       /* invalid, never used */
+    /* 1 */ NPC_RAW_1,  /* 0x0 */
+    /* 2 */ NPC_RAW_2,  /* 0x1 */
+    /* 3 */ NPC_RAW_3,  /* 0x2 */
+    /* 4 */ NPC_RAW_4,  /* 0x4 */
+    /* 5 */ 0xFF,       /* not directly encodable — split into 4+1 or 3+2 */
+    /* 6 */ NPC_RAW_6,  /* 0x3 */
+    /* 7 */ 0xFF,       /* not directly encodable — split into 6+1 or 4+3 */
+    /* 8 */ NPC_RAW_8   /* 0x5 */
+};
+
+/* Valid raw lengths for greedy matching (largest first) */
+static const uint8_t raw_valid_lengths[] = { 8, 6, 4, 3, 2, 1 };
+#define NUM_RAW_LENGTHS 6
+
+
+/* =========================================================================
+ * SECTION 2: BIT-TRANSPOSE — Extracting Per-Channel Bitstreams
+ * =========================================================================
+ *
+ * The DMA delivers interleaved samples: each sample is 1/2/4 bytes with
+ * one bit per channel. We need to transpose this into per-channel
+ * bitstreams of 256 bits (32 bytes) each.
+ *
+ * Classic approach: nested loops with bit tests — O(N*C) branches.
+ * Our approach: process 32 samples at a time as a uint32_t column,
+ * using shift-and-mask to scatter bits into per-channel accumulators.
+ *
+ * For 8-channel mode (1 byte/sample), 32 consecutive samples = 32 bytes
+ * = 8 uint32_t. We process these 8 words to produce 8 channels x 32 bits
+ * each. Repeat 8 times for 256 samples.
+ *
+ * The key trick: we use the "rectangular transpose" method.
+ * Given 32 samples packed as 32 bytes, we can view this as a 32x8 bit
+ * matrix (32 rows of 8 bits). We want the transpose: 8 rows of 32 bits.
+ *
+ * We use the classic log2-step butterfly transpose for bit matrices:
+ *   Step 1: swap 1-bit wide strips at distance 1 (odd/even bit swap)
+ *   Step 2: swap 2-bit wide strips at distance 2
+ *   Step 3: swap 4-bit wide strips at distance 4
+ *   ... and so on.
+ *
+ * But for our specific geometry (32 samples x 8 channels in uint32_t),
+ * a more practical approach: we pack 4 samples into a uint32_t and use
+ * SWAR extraction. Here's the beautiful part:
+ *
+ * If we load 4 consecutive samples (bytes b0,b1,b2,b3) into a uint32_t:
+ *   word = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+ *
+ * Then bit N of each byte is at positions N, N+8, N+16, N+24 in the word.
+ * We can extract channel N's 4 bits with:
+ *   bits = ((word >> N) & 0x01010101) * 0x01010101
+ *   ... but that doesn't pack them right.
+ *
+ * Instead we use the "bit gather" trick:
+ *   mask = (word >> ch) & 0x01010101;   // isolate bit 'ch' from each byte
+ *   mask *= 0x08040201;                 // magic multiply to pack bits
+ *   result = (mask >> 24) & 0x0F;       // top nibble has our 4 bits
+ *
+ * The magic constant 0x08040201 works because:
+ *   bit at pos 0  * 0x01 = stays at bit 0
+ *   bit at pos 8  * 0x02 = moves to bit 9  (but we also get bit 8*1=8)
+ *   bit at pos 16 * 0x04 = moves to bit 18 (plus artifacts)
+ *   bit at pos 24 * 0x08 = moves to bit 27
+ *   After the multiply, bits 24..27 contain the 4 extracted bits!
+ *   The artifacts from carries land below bit 24, so masking with 0x0F
+ *   after >>24 gives us exactly the 4 channel bits, packed.
+ *
+ * This gives us 4 bits of one channel from 4 samples using just:
+ *   1 shift, 1 AND, 1 multiply, 1 shift, 1 AND = 5 instructions
+ * vs. 4 loads + 4 shifts + 4 ANDs + 3 ORs = 15 instructions naive.
+ *
+ * We repeat this 8 times across 32 bytes (8 groups of 4 samples) to build
+ * one uint32_t per channel (32 bits = 32 samples). Then repeat 8 times
+ * for 256 samples total, filling 8 uint32_t per channel = 32 bytes.
+ */
+
+/**
+ * transpose_8ch_chunk()
+ *
+ * Transpose a block of 256 interleaved 8-channel samples into 8 separate
+ * 256-bit (32-byte) per-channel bitstreams.
+ *
+ * @param src       Pointer to 256 bytes of interleaved samples (1 byte/sample)
+ * @param dst       Array of 8 channel buffers, each 32 bytes (8 uint32_t)
+ *
+ * We process 32 samples at a time (one uint32_t of channel output per pass).
+ * Each pass of 32 samples = 8 groups of 4 samples.
+ *
+ * The magic multiply 0x08040201 gathers bit N from 4 consecutive bytes
+ * into 4 consecutive bits at the top of a uint32_t. Beautiful.
+ */
+static void transpose_8ch_chunk(const uint8_t *src, uint32_t dst[8][CHUNK_WORDS])
+{
+    /*
+     * SWAR bit-gather constant. For each byte in a uint32_t, this shifts
+     * the isolated bit by 0, 1, 2, 3 positions respectively so they all
+     * land in bits 24-27 after multiplication.
+     *
+     * Derivation:
+     *   byte 0 (bits  0- 7): * 0x01 -> bit stays at position 0..7
+     *   byte 1 (bits  8-15): * 0x04 -> bit moves up by 2 -> reaches ~10..17
+     *   byte 2 (bits 16-23): * 0x02 -> wait, let's think in terms of the
+     *                                   isolated single bit per byte:
+     *
+     *   If we have val = 0x00_00_00_01  (bit 0 set in byte 0)
+     *     val * 0x08040201 = 0x08040201  -> bit 0 appears at pos 0,9,18,27
+     *   If we have val = 0x00_00_01_00  (bit 0 set in byte 1, i.e., bit 8)
+     *     val * 0x08040201 = 0x08_04_02_01_00 (but truncated to 32 bits)
+     *                      = 0x04020100      -> bit 8 now at pos 8,17,26
+     *   Hmm, the bits we care about land at: 0, 9, 18, 27 (for byte 0)
+     *
+     *   Actually the standard trick: after >> 24, we get bits [27,26,25,24]
+     *   which correspond to byte3_bit0, byte2_bit0, byte1_bit0, byte0_bit0.
+     *   That's bit 'ch' from samples 3,2,1,0 packed into a nibble. But
+     *   we want them in order [s0,s1,s2,s3] from LSB to MSB or vice versa.
+     *
+     *   The multiply 0x08040201 gives us, in bits 24-27:
+     *     bit24 = byte0's bit (sample 0)
+     *     bit25 = byte1's bit (sample 1)
+     *     bit26 = byte2's bit (sample 2)
+     *     bit27 = byte3's bit (sample 3)
+     *   Wait — let me verify with concrete bits.
+     *
+     *   Let b0, b1, b2, b3 be the isolated bit (0 or 1) from each byte.
+     *   val = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+     *   val * 0x08040201:
+     *     b0 * 0x08040201 = b0 at bits {0, 9, 18, 27}
+     *     (b1<<8) * 0x08040201 = b1 at bits {8, 17, 26, 35(overflow)}
+     *     (b2<<16) * 0x08040201 = b2 at bits {16, 25, 34(overflow), ...}
+     *     (b3<<24) * 0x08040201 = b3 at bits {24, 33(overflow), ...}
+     *
+     *   Bits 24-27 of the product:
+     *     bit 24 = b3 (from the b3<<24 term)
+     *     bit 25 = b2 (from the b2<<16 term, shifted +9 -> bit 25)
+     *     bit 26 = b1 (from the b1<<8 term, shifted +18 -> bit 26)
+     *     bit 27 = b0 (from the b0 term, shifted +27 -> bit 27)
+     *
+     *   So (product >> 24) & 0xF gives {b0, b1, b2, b3} with b3 in bit0
+     *   and b0 in bit3. That means sample 3 is LSB, sample 0 is bit3.
+     *
+     *   For building the channel bitstream, we want sample 0 at the lowest
+     *   bit position within each group. So we need to bit-reverse the nibble,
+     *   OR we can use a different gather constant.
+     *
+     *   Alternative: 0x01020408 reverses the order:
+     *     b0 at bits {0, 8+1=9?, no...}
+     *   Let's just use 0x08040201 and accept the reversed nibble order.
+     *   We compensate by processing groups in reverse or by using a
+     *   different accumulation order. Actually, the bit order within
+     *   the channel word just determines whether it's MSB-first or
+     *   LSB-first. We'll define our format as: bit 0 of the channel
+     *   word = sample 0. If the gather gives us the nibble reversed,
+     *   we fix it with a tiny 16-entry LUT or with rbit (Cortex-M33
+     *   has RBIT as a single-cycle instruction!).
+     *
+     *   Actually, let's use a simpler, faster approach: process each
+     *   uint32_t and shift bits into the channel accumulators directly.
+     *   This avoids the multiply entirely for small channel counts.
+     *
+     *   REVISED STRATEGY: For 8 channels, use the direct shift approach.
+     *   For each uint32_t loaded (= 4 samples), extract each channel bit
+     *   and accumulate. With 8 channels and 8 groups of 4, the inner loop
+     *   is 8*8 = 64 extract-and-shift operations per 32-sample block.
+     *
+     *   But wait — there's an even better trick for 8 channels.
+     *   We can process 8 samples at once if we use two uint32_t loads
+     *   and do a full 8x8 bit matrix transpose using the classic
+     *   3-step butterfly with masks. That's the absolute fastest.
+     */
+
+    /*
+     * FAST 8x8 BIT MATRIX TRANSPOSE
+     * ==============================
+     * We treat 8 consecutive samples (8 bytes) as an 8x8 bit matrix where:
+     *   - Each byte is a row (8 bits, one per channel)
+     *   - We want to transpose so each row becomes a channel
+     *
+     * Pack 8 bytes into two uint32_t: hi (samples 4-7) and lo (samples 0-3).
+     * Then use the standard delta-swap transpose:
+     *
+     * delta_swap(a, b, mask, shift):
+     *   t = ((a >> shift) ^ b) & mask;
+     *   b ^= t;
+     *   a ^= (t << shift);
+     *
+     * Three rounds with parameters:
+     *   Round 1: mask=0x00FF00FF, shift=8  (swap 8-bit blocks at dist 8)
+     *            This interleaves the bytes between hi and lo
+     *   Round 2: mask=0x0F0F0F0F, shift=4  (swap nibbles at dist 4)
+     *   Round 3: mask=0x33333333, shift=2  (swap bit-pairs at dist 2)
+     *   Round 4: mask=0x55555555, shift=1  (swap single bits at dist 1)
+     *
+     * After these 4 rounds, the 8x8 matrix is fully transposed.
+     *
+     * For 256 samples we do this 32 times (256/8 = 32 iterations).
+     * Each iteration produces 8 bits per channel (1 byte).
+     * 32 iterations fill 32 bytes per channel. Perfect.
+     *
+     * Cost per iteration: ~20 instructions (shifts, XORs, ANDs).
+     * Total: 32 * 20 = 640 instructions for full transpose of 8 channels.
+     * That's about 3.2 us at 200 MHz. Screaming fast.
+     */
+
+    for (uint32_t block = 0; block < CHUNK_SAMPLES / 8; block++) {
+        const uint8_t *p = src + block * 8;
+
+        /*
+         * Load 8 bytes into two uint32_t. On Cortex-M33 unaligned access
+         * is supported (and common), but we use memcpy for strict aliasing
+         * compliance. The compiler will optimize this into LDR instructions.
+         */
+        uint32_t lo, hi;
+        memcpy(&lo, p, 4);
+        memcpy(&hi, p + 4, 4);
+
+        /*
+         * Now lo = [s0, s1, s2, s3] and hi = [s4, s5, s6, s7]
+         * where each sample is a byte with bit N = channel N.
+         *
+         * We want to transpose this 8x8 bit matrix.
+         * After transpose, the 8 bytes of lo will contain channels 0-3
+         * and the 8 bytes of hi will contain channels 4-7, each byte
+         * holding 8 sample bits.
+         *
+         * Step 1: Swap bytes between lo and hi.
+         * Before: lo = [s0 s1 s2 s3], hi = [s4 s5 s6 s7]
+         * After:  lo = [s0 s4 s2 s6], hi = [s1 s5 s3 s7]
+         * This interleaves so that adjacent bytes in each word come
+         * from the same pair of rows spaced 4 apart.
+         */
+        uint32_t t;
+
+        /* Step 1: mask=0x00FF00FF, shift=8 */
+        /*
+         * This swaps byte 1 of lo with byte 0 of hi, and byte 3 of lo
+         * with byte 2 of hi. The delta-swap pattern:
+         *   t = ((lo >> 8) ^ hi) & 0x00FF00FF;
+         *   hi ^= t; lo ^= t << 8;
+         * After this, the bytes are interleaved between the two words.
+         */
+        t = ((lo >> 8) ^ hi) & 0x00FF00FFu;
+        hi ^= t;
+        lo ^= (t << 8);
+
+        /* Step 2: mask=0x0F0F0F0F, shift=4
+         *
+         * Swap nibbles at distance 4. Within each byte, the high nibble
+         * of one word swaps with the low nibble of the other.
+         * This is the key step that moves channel bits across the
+         * nibble boundary.
+         */
+        t = ((lo >> 4) ^ hi) & 0x0F0F0F0Fu;
+        hi ^= t;
+        lo ^= (t << 4);
+
+        /* Step 3: mask=0x33333333, shift=2
+         *
+         * Swap bit-pairs at distance 2. The even bit-pairs of one word
+         * swap with the odd bit-pairs of the other.
+         */
+        t = ((lo >> 2) ^ hi) & 0x33333333u;
+        hi ^= t;
+        lo ^= (t << 2);
+
+        /* Step 4: mask=0x55555555, shift=1
+         *
+         * Final step: swap individual bits at distance 1.
+         * After this, the 8x8 matrix is fully transposed.
+         */
+        t = ((lo >> 1) ^ hi) & 0x55555555u;
+        hi ^= t;
+        lo ^= (t << 1);
+
+        /*
+         * After transpose:
+         *   lo byte 0 = channel 0, bits for samples {0..7} of this block
+         *   lo byte 1 = channel 2, bits for samples {0..7}
+         *   lo byte 2 = channel 4, bits for samples {0..7}
+         *   lo byte 3 = channel 6, bits for samples {0..7}
+         *   hi byte 0 = channel 1, bits for samples {0..7}
+         *   hi byte 1 = channel 3, bits for samples {0..7}
+         *   hi byte 2 = channel 5, bits for samples {0..7}
+         *   hi byte 3 = channel 7, bits for samples {0..7}
+         *
+         * The channel ordering after this particular delta-swap sequence is
+         * interleaved (even channels in lo, odd in hi). We extract bytes
+         * and place them into the destination arrays.
+         *
+         * Each byte goes into the channel's word array at the right position.
+         * block ranges 0..31, giving us byte offsets 0..31 within each
+         * channel's 32-byte buffer. We store each byte into the appropriate
+         * position in the channel's uint32_t array.
+         *
+         * Since block iterates over groups of 8 samples, byte 'block' of
+         * channel C's buffer holds the 8 sample bits from that group.
+         *
+         * We use a union or byte-level access to pack these. Since dst is
+         * uint32_t[8][8], we can cast to uint8_t* for byte-level writes.
+         */
+        uint8_t *d0 = (uint8_t *)dst[0]; /* channel 0 */
+        uint8_t *d1 = (uint8_t *)dst[1]; /* channel 1 */
+        uint8_t *d2 = (uint8_t *)dst[2]; /* channel 2 */
+        uint8_t *d3 = (uint8_t *)dst[3]; /* channel 3 */
+        uint8_t *d4 = (uint8_t *)dst[4]; /* channel 4 */
+        uint8_t *d5 = (uint8_t *)dst[5]; /* channel 5 */
+        uint8_t *d6 = (uint8_t *)dst[6]; /* channel 6 */
+        uint8_t *d7 = (uint8_t *)dst[7]; /* channel 7 */
+
+        d0[block] = (uint8_t)(lo);
+        d2[block] = (uint8_t)(lo >> 8);
+        d4[block] = (uint8_t)(lo >> 16);
+        d6[block] = (uint8_t)(lo >> 24);
+        d1[block] = (uint8_t)(hi);
+        d3[block] = (uint8_t)(hi >> 8);
+        d5[block] = (uint8_t)(hi >> 16);
+        d7[block] = (uint8_t)(hi >> 24);
+    }
+}
+
+/**
+ * transpose_16ch_chunk()
+ *
+ * Transpose 256 interleaved 16-channel samples (2 bytes/sample = 512 bytes)
+ * into 16 separate 256-bit (32-byte) per-channel bitstreams.
+ *
+ * Strategy: split into two 8-channel sub-problems.
+ * The low byte of each sample has channels 0-7, high byte has channels 8-15.
+ * We deinterleave the bytes first, then apply the 8x8 transpose to each half.
+ */
+static void transpose_16ch_chunk(const uint8_t *src, uint32_t dst[16][CHUNK_WORDS])
+{
+    /*
+     * Deinterleave: extract the low bytes (channels 0-7) and high bytes
+     * (channels 8-15) from the 16-bit samples into two contiguous buffers.
+     *
+     * We process 2 samples at a time (4 bytes = 1 uint32_t):
+     *   word = [lo0, hi0, lo1, hi1]
+     * Extract lo0, lo1 into one buffer and hi0, hi1 into another.
+     *
+     * For better throughput, we process 4 samples (8 bytes = 2 uint32_t)
+     * and use SWAR byte extraction.
+     */
+    uint8_t lo_buf[CHUNK_SAMPLES];
+    uint8_t hi_buf[CHUNK_SAMPLES];
+
+    /*
+     * Deinterleave with SWAR: process 4 bytes at a time.
+     * Each uint32_t from src contains 2 samples: [lo0, hi0, lo1, hi1].
+     * We want lo0, lo1 packed together and hi0, hi1 packed together.
+     *
+     * Using byte-level extraction (the compiler will use UBFX on M33,
+     * which is single-cycle):
+     */
+    for (uint32_t i = 0; i < CHUNK_SAMPLES; i++) {
+        lo_buf[i] = src[i * 2];
+        hi_buf[i] = src[i * 2 + 1];
+    }
+
+    /* Now transpose each half as an 8-channel problem */
+    transpose_8ch_chunk(lo_buf, dst);        /* channels 0-7  */
+    transpose_8ch_chunk(hi_buf, dst + 8);    /* channels 8-15 */
+}
+
+/**
+ * transpose_24ch_chunk()
+ *
+ * Transpose 256 interleaved 24-channel samples (4 bytes/sample = 1024 bytes)
+ * into 24 separate 256-bit (32-byte) per-channel bitstreams.
+ *
+ * Strategy: split into three 8-channel sub-problems.
+ * Byte 0 = channels 0-7, byte 1 = channels 8-15, byte 2 = channels 16-23.
+ * Byte 3 is unused (DMA_SIZE_32 for 24 channels uses full 32-bit words).
+ */
+static void transpose_24ch_chunk(const uint8_t *src, uint32_t dst[24][CHUNK_WORDS])
+{
+    uint8_t buf0[CHUNK_SAMPLES];
+    uint8_t buf1[CHUNK_SAMPLES];
+    uint8_t buf2[CHUNK_SAMPLES];
+
+    /*
+     * Extract bytes 0, 1, 2 from each 4-byte sample.
+     * Byte 3 (channels 24-31) is discarded — we only have 24 channels.
+     *
+     * Unrolling hint: the compiler should auto-vectorize this on M33
+     * with -O2, but even without it, the loop is memory-bound anyway
+     * (256 iterations, 3 stores + 1 load each = ~1024 cycles).
+     */
+    for (uint32_t i = 0; i < CHUNK_SAMPLES; i++) {
+        const uint8_t *s = src + i * 4;
+        buf0[i] = s[0];
+        buf1[i] = s[1];
+        buf2[i] = s[2];
+    }
+
+    transpose_8ch_chunk(buf0, dst);        /* channels 0-7   */
+    transpose_8ch_chunk(buf1, dst + 8);    /* channels 8-15  */
+    transpose_8ch_chunk(buf2, dst + 16);   /* channels 16-23 */
+}
+
+
+/* =========================================================================
+ * SECTION 3: NIBBLE STREAM WRITER — Bit-Aligned Output
+ * =========================================================================
+ *
+ * The nibble encoder writes a stream of 4-bit values (prefix codes and
+ * raw data nibbles). Since the output must be byte-aligned for USB
+ * transfer, we pack nibbles two per byte.
+ *
+ * We use a simple state machine: a 1-bit flag tracks whether the next
+ * nibble goes into the low or high half of the current output byte.
+ *
+ * Trick: instead of branching on even/odd, we use the LSB of the nibble
+ * counter to select the shift amount (0 or 4) via arithmetic:
+ *   shift = (count & 1) << 2;   // 0 or 4, no branch
+ *   *ptr |= (nibble << shift);
+ *
+ * But we need to clear the byte on even counts. Branchless:
+ *   *ptr &= ~(0xFF * (1 - (count & 1)));  // clear on even, keep on odd
+ *   ... actually, just zero the byte when count is even:
+ *   *ptr = (count & 1) ? (*ptr | (nibble << 4)) : nibble;
+ *
+ * The conditional move (ternary) compiles to a single IT/MOVNE on M33.
+ * Even simpler: maintain a byte accumulator and flush every 2 nibbles.
+ */
+
+typedef struct {
+    uint8_t *buf;         /* output buffer pointer */
+    uint32_t pos;         /* current byte position in buf */
+    uint8_t  pending;     /* accumulator for the current byte */
+    uint8_t  nibble_idx;  /* 0 = low nibble pending, 1 = high nibble pending */
+} nibble_writer_t;
+
+static inline void nw_init(nibble_writer_t *nw, uint8_t *buf, uint32_t start_pos)
+{
+    nw->buf = buf;
+    nw->pos = start_pos;
+    nw->pending = 0;
+    nw->nibble_idx = 0;
+}
+
+/**
+ * nw_write_nibble() — write a single 4-bit value to the nibble stream.
+ *
+ * When nibble_idx is 0, store in low nibble of pending.
+ * When nibble_idx is 1, store in high nibble and flush the byte.
+ *
+ * Using branchless: the branch predictor on M33 is decent (2-stage pipeline),
+ * but for a hot inner loop, branchless is still king because it eliminates
+ * pipeline bubbles entirely.
+ *
+ * Trick: we always write to pending. We conditionally flush.
+ *   pending |= (nibble << (nibble_idx * 4));
+ *   if (nibble_idx) { buf[pos++] = pending; pending = 0; }
+ *   nibble_idx ^= 1;
+ *
+ * The conditional flush is unavoidable (we need to advance pos), but it's
+ * a well-predicted branch (alternates 0/1 perfectly).
+ */
+static inline void nw_write_nibble(nibble_writer_t *nw, uint8_t nibble)
+{
+    nw->pending |= (uint8_t)((nibble & 0x0F) << (nw->nibble_idx << 2));
+    if (nw->nibble_idx) {
+        nw->buf[nw->pos++] = nw->pending;
+        nw->pending = 0;
+    }
+    nw->nibble_idx ^= 1;
+}
+
+/**
+ * nw_flush() — flush any pending nibble (pad high nibble with 0).
+ *
+ * Must be called after encoding each channel to ensure the last nibble
+ * is written if the total count is odd.
+ */
+static inline void nw_flush(nibble_writer_t *nw)
+{
+    if (nw->nibble_idx) {
+        /* Odd number of nibbles written — flush with high nibble = 0 */
+        nw->buf[nw->pos++] = nw->pending;
+        nw->pending = 0;
+        nw->nibble_idx = 0;
+    }
+}
+
+/**
+ * nw_get_bytes_written() — return total bytes written so far.
+ *
+ * Does NOT include any un-flushed partial byte. Call nw_flush() first
+ * if you need the final count.
+ */
+static inline uint32_t nw_get_pos(const nibble_writer_t *nw)
+{
+    return nw->pos;
+}
+
+
+/* =========================================================================
+ * SECTION 4: NIBBLE ENCODER — The Main Compression Engine
+ * =========================================================================
+ *
+ * Given a channel's 32 bytes (64 nibbles), we produce a nibble-encoded
+ * output stream that's (hopefully) shorter.
+ *
+ * Algorithm:
+ *   Walk through the 64 nibbles. At each position, classify the current
+ *   nibble:
+ *     - 0x0: start/continue a zero run
+ *     - 0xF: start/continue a ones run
+ *     - other: start/continue a raw run
+ *
+ *   When a run type changes, or when a run reaches a power-of-2 boundary
+ *   that matches an available code, we emit the appropriate prefix code.
+ *
+ *   Greedy strategy: always emit the longest matching run/raw code.
+ *   This is optimal for our code set because longer codes always have
+ *   better compression ratios (more data per prefix nibble).
+ *
+ * Key tricks:
+ *   1. CLZ-based run counting: use __builtin_clz to find the first
+ *      non-matching nibble in a uint32_t word, avoiding per-nibble loops.
+ *   2. Pre-classified nibble array: convert 32 bytes to 64 classifications
+ *      using the nibble_class_lut, then run-length encode the classes.
+ *   3. Branchless max-run clamping: clamp runs to the nearest valid code
+ *      length using a lookup table indexed by leading-zero count.
+ */
+
+/**
+ * count_leading_nibbles()
+ *
+ * Count how many consecutive nibbles starting at position 'start' in the
+ * channel data have the value 'target' (0x0 or 0xF).
+ *
+ * Uses SWAR trick: pack 8 nibbles into a uint32_t (from the raw bytes),
+ * XOR with a word full of the target nibble, then use CLZ to find the
+ * first mismatch.
+ *
+ * @param data    Channel data, 32 bytes (64 nibbles)
+ * @param start   Starting nibble index (0..63)
+ * @param target  Target nibble value (0x0 or 0xF)
+ * @return        Number of consecutive matching nibbles (0..64-start)
+ *
+ * The inner logic:
+ *   For target 0x0: XOR with 0 is identity; any non-zero nibble breaks run.
+ *     count = CLZ(word) / 4 (each nibble is 4 bits).
+ *   For target 0xF: XOR with 0xFFFFFFFF; again CLZ on result.
+ *     But we need to handle the nibble boundary — CLZ counts bits, and
+ *     a nibble is 4 bits. A nibble mismatch might have 1-3 leading zeros
+ *     within the nibble. So we use a different approach:
+ *
+ *   REVISED: For each nibble, check if it matches target. We build a
+ *   bitmask where bit N = 1 if nibble N matches. Then CTZ on the
+ *   complement gives us the run length.
+ *
+ *   But building the bitmask per-nibble is itself a loop. Instead:
+ *
+ *   SWAR nibble comparison:
+ *     To check if all nibbles in a word are 0x0:
+ *       word == 0 (trivial, just one comparison)
+ *     To check if all nibbles are 0xF:
+ *       word == 0xFFFFFFFF (trivial)
+ *     For partial words, count leading matching nibbles:
+ *       For zeros: ~word = all 1s where zero nibbles are, but also
+ *         within non-zero nibbles. We need to detect the first non-zero
+ *         nibble. Trick: use the SWAR "any bit set in nibble" test:
+ *           has_nonzero = (word | (word>>1) | (word>>2) | (word>>3)) & 0x11111111
+ *         Each bit in the 0x11111111 mask tells us if that nibble was non-zero.
+ *         Then CLZ(has_nonzero) / 4 counts leading zero nibbles.
+ *         Wait, that's not right because CLZ counts individual zero bits.
+ *         But the 0x11111111 mask means only every 4th bit is set, so
+ *         CLZ will count 4 bits per zero nibble... hmm, not exactly.
+ *
+ *   SIMPLEST FAST APPROACH: work with bytes. Each byte has 2 nibbles.
+ *   Check if byte == 0x00 (both nibbles zero) or == 0xFF (both ones).
+ *   For partial matches, check lo/hi nibble separately. This gives us
+ *   a tight loop that processes 2 nibbles per iteration with early exit.
+ *
+ *   On Cortex-M33, the branch predictor handles sequential patterns well,
+ *   and the loop body is tiny (load, compare, break), so this beats the
+ *   SWAR approach for typical run lengths (which are often short in
+ *   real logic analyzer data).
+ */
+static uint32_t count_run(const uint8_t *data, uint32_t start_nibble, uint8_t target)
+{
+    uint32_t count = 0;
+    uint32_t pos = start_nibble;
+    const uint32_t end = CHUNK_NIBBLES; /* 64 */
+
+    /*
+     * Target fill byte: if target is 0x0, fill is 0x00. If 0xF, fill is 0xFF.
+     * Branchless: fill = target | (target << 4) = target * 0x11.
+     *
+     * This is a classic trick: replicate a nibble to fill a byte without
+     * branching. 0x0 * 0x11 = 0x00, 0xF * 0x11 = 0xFF. Beautiful.
+     */
+    const uint8_t fill_byte = target * 0x11u;
+
+    /*
+     * Phase 1: If we're starting at an odd nibble (the high nibble of a byte),
+     * check it separately. This aligns us to byte boundaries for the fast path.
+     */
+    if ((pos & 1) && pos < end) {
+        uint8_t byte_val = data[pos >> 1];
+        uint8_t hi_nib = byte_val >> 4;
+        if (hi_nib != target) return 0;
+        count++;
+        pos++;
+    }
+
+    /*
+     * Phase 2: Process whole bytes (2 nibbles each).
+     * Compare entire byte to fill_byte. This checks 2 nibbles per cycle.
+     *
+     * For even longer runs, we could check uint32_t at a time (8 nibbles),
+     * but alignment is tricky. The byte loop is already ~3 cycles/iteration
+     * on M33 (ldrb, cmp, bne) which is 1.5 cycles per nibble. Good enough
+     * for typical run lengths of 2-32 nibbles.
+     *
+     * UPGRADE: check 4 bytes (8 nibbles) at a time using uint32_t.
+     * Requires the starting byte position to be even (which it is after
+     * Phase 1 alignment).
+     */
+    uint32_t byte_pos = pos >> 1;
+    uint32_t fill_word = fill_byte * 0x01010101u; /* replicate byte to all 4 lanes */
+
+    /* Process 4 bytes at a time (8 nibbles) */
+    while (pos + 8 <= end) {
+        uint32_t word;
+        memcpy(&word, &data[byte_pos], 4);
+        if (word != fill_word) break;
+        count += 8;
+        pos += 8;
+        byte_pos += 4;
+    }
+
+    /* Process remaining whole bytes */
+    while (pos + 2 <= end) {
+        if (data[byte_pos] != fill_byte) break;
+        count += 2;
+        pos += 2;
+        byte_pos++;
+    }
+
+    /*
+     * Phase 3: If we stopped mid-byte, check the low nibble of the
+     * current byte (we're at an even nibble position now, so check low).
+     */
+    if (pos < end) {
+        uint8_t byte_val = data[byte_pos];
+        uint8_t lo_nib = byte_val & 0x0F;
+        if (lo_nib == target) {
+            count++;
+            /* Don't advance pos — caller handles it */
+        }
+    }
+
+    return count;
+}
+
+/**
+ * count_mixed_run()
+ *
+ * Count how many consecutive nibbles starting at 'start' are neither
+ * all-zero nor all-one (i.e., mixed/raw data).
+ *
+ * We want to find the longest prefix of non-run nibbles. But we also
+ * want to stop before a run of zeros/ones that could be compressed.
+ * Minimum run length to break is 2 (the smallest run code).
+ *
+ * Strategy: scan forward looking for a pair of identical 0x0 or 0xF nibbles.
+ * If found, the raw run ends just before the pair.
+ */
+static uint32_t count_mixed_run(const uint8_t *data, uint32_t start_nibble)
+{
+    uint32_t count = 0;
+    uint32_t pos = start_nibble;
+    const uint32_t end = CHUNK_NIBBLES;
+
+    while (pos < end) {
+        uint8_t nib = (pos & 1) ? (data[pos >> 1] >> 4) : (data[pos >> 1] & 0x0F);
+        uint8_t cls = nibble_class_lut[nib];
+
+        if (cls != 0) {
+            /*
+             * Found a zero or one nibble. Check if there's a run of 2+
+             * starting here. If yes, end the raw run. If it's a lone
+             * zero/one followed by mixed data, include it in the raw run
+             * (saves a prefix code).
+             *
+             * Look ahead: is the next nibble the same type?
+             */
+            uint32_t next_pos = pos + 1;
+            if (next_pos < end) {
+                uint8_t next_nib = (next_pos & 1)
+                    ? (data[next_pos >> 1] >> 4)
+                    : (data[next_pos >> 1] & 0x0F);
+                uint8_t next_cls = nibble_class_lut[next_nib];
+
+                if (next_cls == cls) {
+                    /* Run of 2+ zeros/ones ahead — end raw run here */
+                    break;
+                }
+            }
+            /* Lone zero/one — absorb into raw run */
+            count++;
+            pos++;
+        } else {
+            count++;
+            pos++;
+        }
+    }
+
+    return count;
+}
+
+/**
+ * encode_channel_nibbles()
+ *
+ * Encode a single channel's 32 bytes (64 nibbles) using the nibble prefix
+ * code scheme. Writes the encoded stream to the nibble_writer.
+ *
+ * Returns the number of OUTPUT nibbles written (prefix codes + raw data).
+ * The caller uses this to decide if encoding saved space vs raw.
+ *
+ * Algorithm: greedy scan.
+ *   At each position, classify the nibble:
+ *     - If it's 0x0 or 0xF: count the run, emit the largest matching code
+ *     - If it's mixed: count consecutive mixed nibbles, emit raw codes
+ *
+ * The greedy approach is optimal here because:
+ *   1. Longer run codes are strictly better (more nibbles per prefix)
+ *   2. Longer raw codes are strictly better (amortize the prefix cost)
+ *   3. No overlapping codes — each position is consumed exactly once
+ */
+static uint32_t encode_channel_nibbles(
+    const uint8_t *channel_data,  /* 32 bytes = 64 nibbles */
+    nibble_writer_t *nw
+)
+{
+    uint32_t pos = 0;
+
+    /*
+     * nib_count tracks how many output nibbles we've written (prefix codes
+     * + raw data nibbles). This is the metric we return so the caller can
+     * compare against the raw cost of 64 nibbles (32 bytes).
+     */
+    uint32_t nib_count = 0;
+
+    while (pos < CHUNK_NIBBLES) {
+        /* Extract current nibble */
+        uint8_t nib = (pos & 1) ? (channel_data[pos >> 1] >> 4)
+                                : (channel_data[pos >> 1] & 0x0F);
+        uint8_t cls = nibble_class_lut[nib];
+
+        if (cls != 0) {
+            /*
+             * Start of a zero or one run.
+             * Count consecutive matching nibbles.
+             */
+            uint8_t target = (cls == 1) ? 0x0 : 0xF;
+            uint32_t run_len = count_run(channel_data, pos, target);
+
+            /*
+             * Emit run codes greedily. Pick the largest code that fits,
+             * subtract its length, repeat until the run is consumed.
+             *
+             * If run_len < 2, we can't emit a run code (minimum is 2).
+             * In that case, fall through to raw encoding below.
+             * But count_mixed_run should have absorbed lone values into
+             * the previous raw run, so run_len >= 2 here. If somehow
+             * run_len == 1 (e.g., at the very start), handle it as raw.
+             */
+            if (run_len < 2) {
+                /* Lone zero/one — treat as raw */
+                nw_write_nibble(nw, NPC_RAW_1);
+                nw_write_nibble(nw, nib);
+                nib_count += 2; /* 1 prefix + 1 data */
+                pos++;
+                continue;
+            }
+
+            const uint8_t *codes = (cls == 1) ? zero_run_codes : one_run_codes;
+
+            while (run_len >= 2) {
+                /*
+                 * Find the largest threshold <= run_len.
+                 * Linear scan of 5 entries — branchless would be overkill
+                 * for just 5 elements, and the branch predictor handles
+                 * this well since the data pattern is repetitive.
+                 */
+                uint32_t i;
+                for (i = 0; i < NUM_RUN_THRESHOLDS; i++) {
+                    if (run_len >= run_thresholds[i]) {
+                        nw_write_nibble(nw, codes[i]);
+                        nib_count++; /* 1 prefix nibble */
+                        run_len -= run_thresholds[i];
+                        pos += run_thresholds[i];
+                        break;
+                    }
+                }
+            }
+
+            /* Handle leftover (0 or 1 nibbles) */
+            if (run_len == 1) {
+                /* Single leftover nibble — emit as raw */
+                nw_write_nibble(nw, NPC_RAW_1);
+                nw_write_nibble(nw, nib);
+                nib_count += 2;
+                pos++;
+            }
+        } else {
+            /*
+             * Mixed/raw data. Count how many non-run nibbles follow.
+             */
+            uint32_t raw_len = count_mixed_run(channel_data, pos);
+
+            /*
+             * Emit raw prefix codes greedily. Available lengths: 8,6,4,3,2,1.
+             * Always pick the largest that fits.
+             */
+            uint32_t raw_remaining = raw_len;
+            uint32_t raw_pos = pos;
+
+            while (raw_remaining > 0) {
+                uint32_t best_len = 0;
+                uint8_t best_code = 0;
+
+                /*
+                 * Find the largest valid raw length <= raw_remaining.
+                 * Linear scan of 6 entries: {8, 6, 4, 3, 2, 1}.
+                 */
+                for (uint32_t i = 0; i < NUM_RAW_LENGTHS; i++) {
+                    if (raw_remaining >= raw_valid_lengths[i]) {
+                        best_len = raw_valid_lengths[i];
+                        best_code = raw_len_to_code[best_len];
+                        break;
+                    }
+                }
+
+                /* Emit the prefix code */
+                nw_write_nibble(nw, best_code);
+                nib_count++;
+
+                /* Emit the raw nibbles */
+                for (uint32_t j = 0; j < best_len; j++) {
+                    uint32_t p = raw_pos + j;
+                    uint8_t raw_nib = (p & 1)
+                        ? (channel_data[p >> 1] >> 4)
+                        : (channel_data[p >> 1] & 0x0F);
+                    nw_write_nibble(nw, raw_nib);
+                    nib_count++;
+                }
+
+                raw_remaining -= best_len;
+                raw_pos += best_len;
+            }
+
+            pos += raw_len;
+        }
+    }
+
+    return nib_count;
+}
+
+
+/* =========================================================================
+ * SECTION 5: CHANNEL CLASSIFICATION — All-Zero / All-One / Mixed Detection
+ * =========================================================================
+ *
+ * Before encoding, we check if a channel is trivially compressible:
+ *   - All 256 bits are 0 -> header = 01, no data
+ *   - All 256 bits are 1 -> header = 10, no data
+ *   - Otherwise -> encode or raw
+ *
+ * Check uses SWAR: OR all 8 uint32_t together. If result is 0, all zeros.
+ * AND all 8 uint32_t together. If result is 0xFFFFFFFF, all ones.
+ *
+ * This is O(1) — always exactly 8 OR + 8 AND operations regardless of data.
+ * No branches in the accumulation. The final check is a single compare.
+ *
+ * Trick: we compute both OR-reduction and AND-reduction in the same loop.
+ * If or_all == 0 -> all zeros. If and_all == 0xFFFFFFFF -> all ones.
+ * Both conditions are mutually exclusive (except for 0-channel edge case).
+ *
+ * Another trick: early exit. If or_all becomes non-zero AND and_all becomes
+ * non-0xFFFFFFFF, we know it's mixed and can stop. But with only 8 words,
+ * the full scan is faster than the branch overhead. Pipeline > branches.
+ */
+
+/**
+ * classify_channel() — determine if a channel is all-0, all-1, or mixed.
+ *
+ * @param words   8 uint32_t values (256 bits of channel data)
+ * @return        HDR_ALL_ZERO, HDR_ALL_ONE, or HDR_RAW/HDR_NIBBLE_ENC (mixed)
+ *
+ * We use a combined OR/AND reduction. The OR catches any set bit (proving
+ * not all-zero). The AND catches any clear bit (proving not all-one).
+ * If neither condition is met after scanning all words, we have our answer.
+ */
+static inline uint8_t classify_channel(const uint32_t *words)
+{
+    /*
+     * SWAR reduction: accumulate OR and AND of all 8 words.
+     *
+     * Unrolled loop — the compiler will register-allocate these beautifully
+     * on M33 with its 13 general-purpose registers. No stack spills.
+     *
+     * Pipeline-friendly: each iteration depends only on the previous
+     * accumulator values, giving the load unit time to prefetch the next word.
+     */
+    uint32_t or_all  = words[0];
+    uint32_t and_all = words[0];
+
+    or_all  |= words[1]; and_all &= words[1];
+    or_all  |= words[2]; and_all &= words[2];
+    or_all  |= words[3]; and_all &= words[3];
+    or_all  |= words[4]; and_all &= words[4];
+    or_all  |= words[5]; and_all &= words[5];
+    or_all  |= words[6]; and_all &= words[6];
+    or_all  |= words[7]; and_all &= words[7];
+
+    /*
+     * Branchless classification using arithmetic:
+     *   or_all == 0          -> all zeros
+     *   and_all == 0xFFFFFFFF -> all ones
+     *   otherwise            -> mixed
+     *
+     * We could encode this branchlessly with:
+     *   result = (or_all == 0) * HDR_ALL_ZERO
+     *          + (and_all == 0xFFFFFFFF) * HDR_ALL_ONE
+     *          + (or_all != 0 && and_all != 0xFFFFFFFF) * HDR_NIBBLE_ENC;
+     * But that's silly — two well-predicted branches are fine for 1-per-channel.
+     */
+    if (or_all == 0) return HDR_ALL_ZERO;
+    if (and_all == 0xFFFFFFFFu) return HDR_ALL_ONE;
+    return HDR_NIBBLE_ENC;  /* will be downgraded to HDR_RAW if encoding is worse */
+}
+
+
+/* =========================================================================
+ * SECTION 6: FULL COMPRESSION PIPELINE
+ * =========================================================================
+ *
+ * compress_chunk() — the main entry point.
+ *
+ * Takes a chunk of 256 interleaved samples from the DMA buffer and
+ * produces a compressed packet for USB CDC transfer.
+ *
+ * Output format:
+ *   [header: ceil(num_channels/4) bytes, 2 bits per channel]
+ *   [channel 0 data: 0/32/variable bytes depending on header]
+ *   [channel 1 data: ...]
+ *   ...
+ *   [channel N-1 data: ...]
+ *
+ * Returns the total output size in bytes.
+ */
+
+/**
+ * compress_chunk()
+ *
+ * @param src           Pointer to 256 interleaved samples from DMA buffer
+ * @param num_channels  Number of channels (8, 16, or 24)
+ * @param mode          CHANNEL_MODE (MODE_8_CHANNEL, etc.)
+ * @param out           Output buffer (must be large enough — worst case is
+ *                      header + 32 bytes * num_channels for all-raw)
+ * @return              Number of bytes written to out
+ *
+ * The function:
+ *   1. Bit-transposes the interleaved data into per-channel bitstreams
+ *   2. Classifies each channel (all-0, all-1, mixed)
+ *   3. For mixed channels, tries nibble encoding; falls back to raw if worse
+ *   4. Packs everything into the output buffer
+ */
+uint32_t compress_chunk(
+    const uint8_t *src,
+    uint8_t num_channels,
+    CHANNEL_MODE mode,
+    uint8_t *out
+)
+{
+    /* Per-channel transposed data: max 24 channels x 8 words = 768 bytes */
+    uint32_t channel_bits[MAX_COMPRESS_CH][CHUNK_WORDS];
+
+    /*
+     * Temporary buffer for nibble-encoded output per channel.
+     * Worst case: every nibble is raw_1 (prefix + data = 2 nibbles per
+     * input nibble) -> 128 nibbles = 64 bytes. But that's worse than raw
+     * (32 bytes), so it would be sent as raw. Still, we need the temp
+     * buffer to measure the encoded size before deciding.
+     *
+     * Max useful encoded size: 32 bytes (same as raw). Anything larger
+     * gets discarded. So 64 bytes is safe.
+     */
+    uint8_t enc_buf[64];
+
+    /*
+     * Header size: ceil(num_channels / 4) bytes.
+     * Each byte holds 4 channel headers (2 bits each).
+     * Channels 0-3 in byte 0, channels 4-7 in byte 1, etc.
+     *
+     * Bit layout within a header byte:
+     *   bits [1:0] = channel 0 (or 4, 8, ...)
+     *   bits [3:2] = channel 1 (or 5, 9, ...)
+     *   bits [5:4] = channel 2 (or 6, 10, ...)
+     *   bits [7:6] = channel 3 (or 7, 11, ...)
+     */
+    uint32_t header_bytes = (num_channels + 3) >> 2;  /* ceil(N/4), no division */
+
+    /* Zero out the header area */
+    memset(out, 0, header_bytes);
+
+    /*
+     * Step 1: Bit-transpose.
+     * Dispatch based on mode to avoid branch inside the hot transpose loop.
+     *
+     * We use a switch, not a function pointer table, because on M33 the
+     * TBB/TBH (table branch byte/halfword) instruction makes switches
+     * extremely efficient — single cycle dispatch.
+     */
+    switch (mode) {
+        case MODE_8_CHANNEL:
+            transpose_8ch_chunk(src, channel_bits);
+            break;
+        case MODE_16_CHANNEL:
+            transpose_16ch_chunk(src, channel_bits);
+            break;
+        case MODE_24_CHANNEL:
+            transpose_24ch_chunk(src, channel_bits);
+            break;
+    }
+
+    /*
+     * Step 2 & 3: Classify each channel and encode.
+     * We write channel data immediately after the header in the output
+     * buffer. The write position tracks where the next channel's data goes.
+     */
+    uint32_t write_pos = header_bytes;
+
+    for (uint8_t ch = 0; ch < num_channels; ch++) {
+        uint8_t classification = classify_channel(channel_bits[ch]);
+
+        if (classification == HDR_ALL_ZERO || classification == HDR_ALL_ONE) {
+            /*
+             * Trivially compressible — no data bytes needed.
+             * Just set the header bits. Beautiful: 256 bits compressed to 2 bits.
+             */
+            uint32_t hdr_byte = ch >> 2;      /* which header byte */
+            uint32_t hdr_shift = (ch & 3) << 1; /* bit position within that byte */
+            out[hdr_byte] |= (classification << hdr_shift);
+            /* No data to write — skip to next channel */
+            continue;
+        }
+
+        /*
+         * Mixed channel. Try nibble encoding.
+         *
+         * We encode into a temporary buffer and measure the size.
+         * If encoded size >= raw size (32 bytes), we send raw instead.
+         *
+         * The encoding writes nibbles, so the output is in nibbles.
+         * The byte size is ceil(nibble_count / 2).
+         * Raw cost: 32 bytes = 64 nibbles.
+         * If encoded_nibbles >= 64, raw wins.
+         */
+        nibble_writer_t nw;
+        nw_init(&nw, enc_buf, 0);
+
+        uint32_t encoded_nibbles = encode_channel_nibbles(
+            (const uint8_t *)channel_bits[ch], &nw
+        );
+        nw_flush(&nw);
+
+        uint32_t encoded_bytes = nw_get_pos(&nw);
+
+        if (encoded_bytes < CHUNK_BYTES) {
+            /*
+             * Nibble encoding wins! Copy encoded data to output.
+             *
+             * Header = 11 (nibble encoded).
+             * memcpy is optimized on M33 to use LDM/STM (load/store multiple)
+             * for aligned transfers, giving us 4 bytes per cycle.
+             */
+            uint32_t hdr_byte = ch >> 2;
+            uint32_t hdr_shift = (ch & 3) << 1;
+            out[hdr_byte] |= (HDR_NIBBLE_ENC << hdr_shift);
+
+            memcpy(&out[write_pos], enc_buf, encoded_bytes);
+            write_pos += encoded_bytes;
+        } else {
+            /*
+             * Raw wins (or ties). Copy the 32 raw bytes.
+             *
+             * Header = 00 (raw).
+             * Since HDR_RAW is 0x00 and we zeroed the header, we don't
+             * need to set anything — the bits are already 00.
+             * This is a tiny optimization: avoid the read-modify-write
+             * of the header byte for the most common case (raw data).
+             */
+            /* HDR_RAW is 0, header already zeroed — no write needed */
+            memcpy(&out[write_pos], channel_bits[ch], CHUNK_BYTES);
+            write_pos += CHUNK_BYTES;
+        }
+    }
+
+    return write_pos;
+}
+
+
+/* =========================================================================
+ * SECTION 7: STREAMING INTERFACE — DMA Buffer Processing
+ * =========================================================================
+ *
+ * These functions integrate with the DMA ping-pong system.
+ * When a DMA buffer is complete, the ISR signals Core 1, which calls
+ * compress_dma_buffer() to process the entire buffer in 256-sample chunks.
+ *
+ * The output goes into a ring buffer that Core 0 drains via USB CDC.
+ *
+ * Design: Core 1 is the sole producer, Core 0 is the sole consumer.
+ * The ring buffer uses a lock-free SPSC (single-producer single-consumer)
+ * design with acquire/release semantics on the head/tail pointers.
+ * On Cortex-M33, a simple volatile + DMB (data memory barrier) suffices.
+ */
+
+/**
+ * compress_dma_buffer()
+ *
+ * Process an entire DMA buffer, compressing it in 256-sample chunks.
+ *
+ * @param dma_buf       Pointer to the completed DMA buffer
+ * @param dma_buf_size  Size of the DMA buffer in bytes
+ * @param num_channels  Number of channels (8, 16, or 24)
+ * @param mode          CHANNEL_MODE
+ * @param out           Output buffer for compressed data
+ * @param out_max       Maximum output buffer size
+ * @return              Total bytes of compressed data written to out,
+ *                      or 0 if output buffer would overflow
+ *
+ * Each chunk of 256 samples occupies:
+ *   8-ch mode:  256 * 1 = 256 bytes
+ *   16-ch mode: 256 * 2 = 512 bytes
+ *   24-ch mode: 256 * 4 = 1024 bytes
+ */
+uint32_t compress_dma_buffer(
+    const uint8_t *dma_buf,
+    uint32_t dma_buf_size,
+    uint8_t num_channels,
+    CHANNEL_MODE mode,
+    uint8_t *out,
+    uint32_t out_max
+)
+{
+    /*
+     * Bytes per sample: determined by channel mode.
+     * Use a shift instead of a multiply or lookup:
+     *   MODE_8_CHANNEL  = 0 -> 1 byte  (1 << 0)
+     *   MODE_16_CHANNEL = 1 -> 2 bytes  (1 << 1)
+     *   MODE_24_CHANNEL = 2 -> 4 bytes  (1 << 2)
+     *
+     * Wait — MODE_24_CHANNEL uses DMA_SIZE_32 which is 4 bytes, but
+     * the enum value is 2. So: bytes_per_sample = (mode == 2) ? 4 : (1 << mode).
+     * Or more elegantly: use a 3-entry LUT.
+     *
+     * TRICK: encode the shift directly from the mode enum.
+     *   shift_lut[0] = 0 (1 byte)
+     *   shift_lut[1] = 1 (2 bytes)
+     *   shift_lut[2] = 2 (4 bytes)
+     *   bytes = 1 << shift_lut[mode]
+     *
+     * But mode 2 needs shift 2 (4 bytes), not shift 2 (also 4 bytes). Perfect!
+     * Wait: 1 << 2 = 4. Yes. So bytes_per_sample = 1 << mode... but
+     * mode 1 gives 1<<1=2 (correct) and mode 2 gives 1<<2=4 (correct).
+     * Mode 0 gives 1<<0=1 (correct).
+     *
+     * Nope, that's only correct by coincidence of enum values. Let's be explicit.
+     */
+    static const uint8_t bytes_per_sample_lut[] = { 1, 2, 4 };
+    uint32_t bytes_per_sample = bytes_per_sample_lut[mode];
+    uint32_t chunk_input_bytes = CHUNK_SAMPLES * bytes_per_sample;
+
+    uint32_t total_chunks = dma_buf_size / chunk_input_bytes;
+    uint32_t out_pos = 0;
+
+    for (uint32_t chunk = 0; chunk < total_chunks; chunk++) {
+        const uint8_t *chunk_src = dma_buf + chunk * chunk_input_bytes;
+
+        /*
+         * Worst-case output per chunk: header + 32 bytes * num_channels.
+         * header = ceil(num_channels/4) = at most 6 bytes (for 24 channels).
+         * data = 32 * 24 = 768 bytes.
+         * total worst case per chunk = 774 bytes.
+         *
+         * Check for output buffer overflow before compressing.
+         * This avoids writing past the end of the output buffer.
+         */
+        uint32_t worst_case = ((num_channels + 3) >> 2) + (CHUNK_BYTES * num_channels);
+        if (out_pos + worst_case > out_max) {
+            return 0; /* overflow — signal error to caller */
+        }
+
+        uint32_t written = compress_chunk(chunk_src, num_channels, mode, &out[out_pos]);
+        out_pos += written;
+    }
+
+    return out_pos;
+}
+
+
+/* =========================================================================
+ * SECTION 8: UTILITY FUNCTIONS
+ * =========================================================================
+ */
+
+/**
+ * compress_get_max_output_size()
+ *
+ * Calculate the maximum possible output size for a DMA buffer.
+ * Used by the caller to pre-allocate the output buffer.
+ *
+ * Worst case: every channel of every chunk is sent as raw.
+ * Output = num_chunks * (header_bytes + 32 * num_channels).
+ *
+ * @param dma_buf_size   DMA buffer size in bytes
+ * @param num_channels   Number of channels
+ * @param mode           Channel mode
+ * @return               Maximum output size in bytes
+ */
+uint32_t compress_get_max_output_size(
+    uint32_t dma_buf_size,
+    uint8_t num_channels,
+    CHANNEL_MODE mode
+)
+{
+    static const uint8_t bps_lut[] = { 1, 2, 4 };
+    uint32_t bytes_per_sample = bps_lut[mode];
+    uint32_t chunk_input_bytes = CHUNK_SAMPLES * bytes_per_sample;
+    uint32_t total_chunks = dma_buf_size / chunk_input_bytes;
+    uint32_t header_bytes = (num_channels + 3) >> 2;
+    uint32_t max_per_chunk = header_bytes + (CHUNK_BYTES * num_channels);
+    return total_chunks * max_per_chunk;
+}
+
+/**
+ * compress_single_chunk_bound()
+ *
+ * Upper bound on the output size of a single 256-sample chunk.
+ * Useful for sizing temp buffers.
+ *
+ * @param num_channels  Number of channels
+ * @return              Maximum bytes for one chunk's output
+ */
+uint32_t compress_single_chunk_bound(uint8_t num_channels)
+{
+    return ((num_channels + 3) >> 2) + (CHUNK_BYTES * num_channels);
+}
+
+
+/*
+ * ==========================================================================
+ * NOTES ON FURTHER OPTIMIZATIONS (for the truly obsessed)
+ * ==========================================================================
+ *
+ * 1. ARM RBIT instruction:
+ *    Cortex-M33 has RBIT (reverse bits in a word) as a single-cycle
+ *    instruction. If the bit ordering from the transpose is wrong, RBIT
+ *    fixes it in one cycle. We don't need it in the current implementation
+ *    because we defined our format to match the transpose output order.
+ *
+ * 2. De Bruijn sequences:
+ *    For finding the position of a single set bit (e.g., isolating a
+ *    nibble boundary in a bitmask), the de Bruijn multiply-and-shift
+ *    trick is classic: multiply by a de Bruijn constant and take the
+ *    top bits as a LUT index. But on M33, CLZ/CTZ are single-cycle,
+ *    so de Bruijn is unnecessary. We include this note for architectures
+ *    without hardware CLZ (like original Cortex-M0).
+ *
+ * 3. DMA-to-DMA compression:
+ *    On RP2350, we could theoretically chain DMA channels to do some of
+ *    the byte extraction (for 16/24-ch mode deinterleaving) in hardware.
+ *    The DMA engine supports byte-lane selection via ring buffer addressing.
+ *    This would free CPU cycles but adds complexity. Worth investigating
+ *    for extreme sample rates.
+ *
+ * 4. PIO-based transpose:
+ *    The PIO could be programmed to output bit-transposed data directly,
+ *    avoiding the CPU transpose entirely. Each PIO SM would extract one
+ *    channel bit. With 8 SMs across 2 PIO blocks, this covers 8 channels
+ *    natively. For 16/24 channels, we'd need time-multiplexing.
+ *    Trade-off: uses PIO resources that may be needed for capture.
+ *
+ * 5. Cache-line optimization:
+ *    RP2350's bus fabric has a 4-word (16-byte) burst capability. Aligning
+ *    buffer accesses to 16-byte boundaries and accessing in 16-byte
+ *    strides maximizes bus utilization. Our transpose naturally does this
+ *    when processing 4 bytes at a time.
+ *
+ * 6. Two-pass encoding:
+ *    First pass: classify all 64 nibbles into a 64-byte array of
+ *    {0=mixed, 1=zero, 2=one}. Second pass: run-length encode the
+ *    classifications. This separates classification from encoding,
+ *    improving I-cache utilization. For 64 nibbles this doesn't matter
+ *    much, but for larger chunk sizes it would help.
+ *
+ * 7. LDREX/STREX for lock-free ring buffer:
+ *    The SPSC ring buffer between Core 0 and Core 1 uses exclusive
+ *    load/store pairs for atomic pointer updates. On M33 these are
+ *    single-cycle when uncontended (no cache, so no invalidation overhead).
+ *
+ * 8. Bit-banding (not available on RP2350):
+ *    Older Cortex-M cores had bit-band regions for atomic bit
+ *    manipulation. RP2350 doesn't support this, but the SIO
+ *    (Single-cycle I/O) block provides similar functionality for GPIO.
+ *
+ * ==========================================================================
+ */
