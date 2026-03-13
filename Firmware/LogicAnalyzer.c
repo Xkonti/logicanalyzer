@@ -243,9 +243,15 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                             sendResponse(msg, fromWiFi);
                             sprintf(msg, "CHANNELS:%d\n", MAX_CHANNELS);
                             sendResponse(msg, fromWiFi);
-                            sprintf(msg, "SSID:%s\n", wifiSettings.apName);
+                            // Copy with forced null-termination (flash may be 0xFF when uninitialized)
+                            char safeBuf[34];
+                            memcpy(safeBuf, (const char*)wifiSettings.apName, 33);
+                            safeBuf[33] = '\0';
+                            sprintf(msg, "SSID:%s\n", safeBuf);
                             sendResponse(msg, fromWiFi);
-                            sprintf(msg, "HOSTNAME:%s\n", wifiSettings.hostname);
+                            memcpy(safeBuf, (const char*)wifiSettings.hostname, 33);
+                            safeBuf[33] = '\0';
+                            sprintf(msg, "HOSTNAME:%s\n", safeBuf);
                             sendResponse(msg, fromWiFi);
                         }
                         break;
@@ -289,7 +295,7 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                         memcpy(settings.apName, wReq->apName, 33);
                         // Empty password = keep existing (device doesn't report password over handshake)
                         if (wReq->passwd[0] == '\0')
-                            memcpy(settings.passwd, wifiSettings.passwd, 64);
+                            memcpy(settings.passwd, (const char*)wifiSettings.passwd, 64);
                         else
                             memcpy(settings.passwd, wReq->passwd, 64);
                         memcpy(settings.ipAddress, wReq->ipAddress, 16);
