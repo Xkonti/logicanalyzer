@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { useViewportStore } from './viewport.js'
+import { useViewportStore, ZOOM_LEVELS } from './viewport.js'
 import { useCaptureStore } from './capture.js'
 
 // Need the same mocks as capture.test.js for device store transitive dependency
@@ -42,6 +42,28 @@ async function setupCapture(sampleCount) {
   await capture.loadCsv(`CH0\n${samples}`)
   return capture
 }
+
+describe('ZOOM_LEVELS', () => {
+  it('starts at minimum visible samples', () => {
+    expect(ZOOM_LEVELS[0]).toBe(10)
+  })
+
+  it('is strictly increasing', () => {
+    for (let i = 1; i < ZOOM_LEVELS.length; i++) {
+      expect(ZOOM_LEVELS[i]).toBeGreaterThan(ZOOM_LEVELS[i - 1])
+    }
+  })
+
+  it('contains only integers', () => {
+    for (const level of ZOOM_LEVELS) {
+      expect(Number.isInteger(level)).toBe(true)
+    }
+  })
+
+  it('covers a large range', () => {
+    expect(ZOOM_LEVELS[ZOOM_LEVELS.length - 1]).toBeGreaterThanOrEqual(1e10)
+  })
+})
 
 describe('useViewportStore', () => {
   beforeEach(() => {
@@ -95,12 +117,13 @@ describe('useViewportStore', () => {
   })
 
   describe('zoomIn', () => {
-    it('halves visible range', async () => {
+    it('steps to next smaller zoom level', async () => {
       await setupCapture(1000)
       const viewport = useViewportStore()
-      await viewport.setView(0, 200)
+      // Set to an exact zoom level (ZOOM_LEVELS includes 15)
+      await viewport.setView(0, 15)
       await viewport.zoomIn()
-      expect(viewport.visibleSamples).toBe(100)
+      expect(viewport.visibleSamples).toBe(10) // one step down
     })
 
     it('does not zoom below minimum', async () => {
@@ -114,32 +137,44 @@ describe('useViewportStore', () => {
     it('maintains center on zoom', async () => {
       await setupCapture(1000)
       const viewport = useViewportStore()
-      await viewport.setView(100, 200)
-      // Center is at 200
+      // 23 is a zoom level (10, 15, 23, 34, ...)
+      await viewport.setView(100, 23)
+      // Center is at 111, zoom in → 15
       await viewport.zoomIn()
-      // New visible = 100, center should still be near 200
-      expect(viewport.firstSample).toBe(150)
-      expect(viewport.visibleSamples).toBe(100)
+      expect(viewport.visibleSamples).toBe(15)
+      // firstSample = 111 - floor(15/2) = 111 - 7 = 104
+      expect(viewport.firstSample).toBe(104)
     })
 
     it('accepts custom center', async () => {
       await setupCapture(1000)
       const viewport = useViewportStore()
-      await viewport.setView(0, 200)
-      await viewport.zoomIn(50)
-      // New visible = 100, centered on 50
+      await viewport.setView(0, 23)
+      await viewport.zoomIn(5)
+      // New visible = 15, centered on 5 → first = 5 - 7 = clamped to 0
       expect(viewport.firstSample).toBe(0)
-      expect(viewport.visibleSamples).toBe(100)
+      expect(viewport.visibleSamples).toBe(15)
+    })
+
+    it('snaps down from a non-level value', async () => {
+      await setupCapture(1000)
+      const viewport = useViewportStore()
+      // 200 is between zoom levels 180 and 270
+      await viewport.setView(0, 200)
+      await viewport.zoomIn()
+      // findZoomIndex(200) finds 180 (largest <= 200), which is < 200, so stays at 180
+      expect(viewport.visibleSamples).toBe(180)
     })
   })
 
   describe('zoomOut', () => {
-    it('doubles visible range', async () => {
+    it('steps to next larger zoom level', async () => {
       await setupCapture(1000)
       const viewport = useViewportStore()
-      await viewport.setView(0, 100)
+      // 15 is a zoom level
+      await viewport.setView(0, 15)
       await viewport.zoomOut()
-      expect(viewport.visibleSamples).toBe(200)
+      expect(viewport.visibleSamples).toBe(23) // next level up
     })
 
     it('does not zoom beyond total samples', async () => {

@@ -8,19 +8,25 @@ export const useCursorStore = defineStore('cursor', () => {
   /** CSS pixel x position (snapped or raw), or null if cursor is off-canvas. */
   const cursorX = ref(null)
 
-  function setCursor(sample, x) {
+  /** Raw mouse CSS pixel x — preserved across viewport changes for recalculation. */
+  const rawX = ref(null)
+
+  function setCursor(sample, x, raw) {
     cursorSample.value = sample
     cursorX.value = x
+    rawX.value = raw
   }
 
   function clearCursor() {
     cursorSample.value = null
     cursorX.value = null
+    rawX.value = null
   }
 
   return {
     cursorSample,
     cursorX,
+    rawX,
     setCursor,
     clearCursor,
   }

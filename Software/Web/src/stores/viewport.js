@@ -4,8 +4,36 @@ import { useCaptureStore } from './capture.js'
 import { useStreamStore } from './stream.js'
 
 const MIN_VISIBLE_SAMPLES = 10
-const ZOOM_FACTOR = 0.5
 const SCROLL_FACTOR = 0.1
+
+/**
+ * Pregenerated table of zoom levels (visible sample counts).
+ * Each step is ~1.5x the previous, producing clean integer values.
+ * Covers from MIN_VISIBLE_SAMPLES up to 10 billion — far beyond any real capture.
+ */
+export const ZOOM_LEVELS = (() => {
+  const levels = [MIN_VISIBLE_SAMPLES]
+  while (levels[levels.length - 1] < 1e10) {
+    const next = Math.round(levels[levels.length - 1] * 1.5)
+    levels.push(next)
+  }
+  return levels
+})()
+
+/**
+ * Find the index of the largest zoom level <= value.
+ * Returns 0 if value is at or below the minimum.
+ */
+function findZoomIndex(value) {
+  let lo = 0
+  let hi = ZOOM_LEVELS.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (ZOOM_LEVELS[mid] <= value) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
 
 export const useViewportStore = defineStore('viewport', () => {
   const firstSample = ref(0)
@@ -45,7 +73,10 @@ export const useViewportStore = defineStore('viewport', () => {
 
   async function zoomIn(center = null) {
     if (!canZoomIn.value) return
-    const newVisible = Math.max(MIN_VISIBLE_SAMPLES, Math.floor(visibleSamples.value * ZOOM_FACTOR))
+    const idx = findZoomIndex(visibleSamples.value)
+    // Step down one level, but only if we're actually at or above that level
+    const newIdx = ZOOM_LEVELS[idx] >= visibleSamples.value ? Math.max(0, idx - 1) : idx
+    const newVisible = ZOOM_LEVELS[newIdx]
     const mid = center ?? firstSample.value + Math.floor(visibleSamples.value / 2)
     const newFirst = mid - Math.floor(newVisible / 2)
     const { first: f, visible: v } = clamp(newFirst, newVisible)
@@ -55,7 +86,10 @@ export const useViewportStore = defineStore('viewport', () => {
 
   async function zoomOut(center = null) {
     if (!canZoomOut.value) return
-    const newVisible = Math.floor(visibleSamples.value / ZOOM_FACTOR)
+    const idx = findZoomIndex(visibleSamples.value)
+    // Step up one level
+    const newIdx = Math.min(ZOOM_LEVELS.length - 1, idx + 1)
+    const newVisible = ZOOM_LEVELS[newIdx]
     const mid = center ?? firstSample.value + Math.floor(visibleSamples.value / 2)
     const newFirst = mid - Math.floor(newVisible / 2)
     const { first: f, visible: v } = clamp(newFirst, newVisible)

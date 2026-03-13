@@ -17,6 +17,29 @@ export function useWaveformInput(canvasRef, rendererRef) {
 
   let manager = null
 
+  /**
+   * Recalculate cursor sample and snapped position from the raw mouse pixel.
+   * Called after viewport changes (zoom) so the cursor stays accurate.
+   */
+  function updateCursorFromRaw() {
+    const renderer = rendererRef.value
+    if (!renderer || cursor.rawX == null) return
+
+    const offsetX = cursor.rawX
+    const sample = renderer.sampleAtX(offsetX)
+    const sampleWidth = renderer._width / renderer.visibleSamples
+
+    let snappedX
+    if (sampleWidth >= 1) {
+      snappedX = renderer.xAtSample(sample) + sampleWidth / 2
+    } else {
+      snappedX = offsetX
+    }
+
+    cursor.setCursor(sample, snappedX, offsetX)
+    renderer.setCursorX(snappedX)
+  }
+
   function handleZoom({ delta }) {
     // Disable follow on manual zoom during stream
     if (stream.streaming) {
@@ -31,6 +54,9 @@ export function useWaveformInput(canvasRef, rendererRef) {
     } else {
       viewport.zoomOut(center)
     }
+
+    // Recalculate cursor position for the new viewport
+    updateCursorFromRaw()
   }
 
   function handleCursorMove({ offsetX }) {
@@ -42,14 +68,12 @@ export function useWaveformInput(canvasRef, rendererRef) {
 
     let snappedX
     if (sampleWidth >= 1) {
-      // Zoomed in: snap to center of the sample column
       snappedX = renderer.xAtSample(sample) + sampleWidth / 2
     } else {
-      // Zoomed out: follow mouse exactly
       snappedX = offsetX
     }
 
-    cursor.setCursor(sample, snappedX)
+    cursor.setCursor(sample, snappedX, offsetX)
     renderer.setCursorX(snappedX)
   }
 
