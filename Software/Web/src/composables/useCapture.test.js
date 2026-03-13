@@ -48,7 +48,7 @@ vi.mock('../core/driver/analyzer.js', () => {
     }
     getDeviceInfo() {
       return {
-        name: 'ANALYZER_V6_5',
+        name: 'LA-7.0.0',
         maxFrequency: 100000000,
         blastFrequency: 200000000,
         channels: 24,

@@ -9,28 +9,28 @@ import {
 } from './parser.js'
 
 describe('validateVersion', () => {
-  it('accepts valid version V6_5', () => {
-    const result = validateVersion('ANALYZER_V6_5')
-    expect(result).toEqual({ valid: true, major: 6, minor: 5 })
+  it('accepts valid version LA-7.0.0', () => {
+    const result = validateVersion('LA-7.0.0')
+    expect(result).toEqual({ valid: true, major: 7, minor: 0, patch: 0 })
   })
 
-  it('accepts higher major version V7_0', () => {
-    const result = validateVersion('ANALYZER_V7_0')
-    expect(result).toEqual({ valid: true, major: 7, minor: 0 })
+  it('accepts higher major version LA-8.0.0', () => {
+    const result = validateVersion('LA-8.0.0')
+    expect(result).toEqual({ valid: true, major: 8, minor: 0, patch: 0 })
   })
 
-  it('accepts higher minor version V6_8', () => {
-    const result = validateVersion('ANALYZER_V6_8')
-    expect(result).toEqual({ valid: true, major: 6, minor: 8 })
+  it('accepts higher minor version LA-7.1.0', () => {
+    const result = validateVersion('LA-7.1.0')
+    expect(result).toEqual({ valid: true, major: 7, minor: 1, patch: 0 })
   })
 
-  it('rejects lower major version V5_9', () => {
-    const result = validateVersion('ANALYZER_V5_9')
-    expect(result.valid).toBe(false)
+  it('accepts higher patch version LA-7.0.1', () => {
+    const result = validateVersion('LA-7.0.1')
+    expect(result).toEqual({ valid: true, major: 7, minor: 0, patch: 1 })
   })
 
-  it('rejects lower minor version V6_4', () => {
-    const result = validateVersion('ANALYZER_V6_4')
+  it('rejects lower major version LA-6.9.9', () => {
+    const result = validateVersion('LA-6.9.9')
     expect(result.valid).toBe(false)
   })
 
@@ -39,9 +39,9 @@ describe('validateVersion', () => {
     expect(result.valid).toBe(false)
   })
 
-  it('handles version with different prefix', () => {
+  it('rejects old format LOGIC_ANALYZER_V6_5', () => {
     const result = validateVersion('LOGIC_ANALYZER_V6_5')
-    expect(result).toEqual({ valid: true, major: 6, minor: 5 })
+    expect(result.valid).toBe(false)
   })
 
   it('rejects null/undefined', () => {
@@ -57,11 +57,13 @@ describe('validateVersion', () => {
 describe('parseInitResponse', () => {
   function makeValidLines() {
     return [
-      'ANALYZER_V6_5',
+      'LA-7.0.0',
       'FREQ:100000000',
       'BLASTFREQ:200000000',
       'BUFFER:262144',
       'CHANNELS:24',
+      'SSID:MyNetwork',
+      'HOSTNAME:analyzer1',
     ]
   }
 
@@ -71,13 +73,15 @@ describe('parseInitResponse', () => {
 
     const info = await parseInitResponse(transport)
     expect(info).toEqual({
-      version: 'ANALYZER_V6_5',
-      majorVersion: 6,
-      minorVersion: 5,
+      version: 'LA-7.0.0',
+      majorVersion: 7,
+      minorVersion: 0,
       maxFrequency: 100000000,
       blastFrequency: 200000000,
       bufferSize: 262144,
       channelCount: 24,
+      ssid: 'MyNetwork',
+      hostname: 'analyzer1',
     })
   })
 
@@ -93,17 +97,19 @@ describe('parseInitResponse', () => {
     const lines = [
       'FREQ:100000000',
       'BLASTFREQ:200000000',
-      'ANALYZER_V6_5',
+      'LA-7.0.0',
       'FREQ:100000000',
       'BLASTFREQ:200000000',
       'BUFFER:262144',
       'CHANNELS:24',
+      'SSID:TestNet',
+      'HOSTNAME:host1',
     ]
     const transport = createMockTransport({ lines })
     await transport.connect()
 
     const info = await parseInitResponse(transport)
-    expect(info.version).toBe('ANALYZER_V6_5')
+    expect(info.version).toBe('LA-7.0.0')
     expect(info.maxFrequency).toBe(100000000)
   })
 
@@ -143,15 +149,14 @@ describe('parseInitResponse', () => {
     await expect(parseInitResponse(transport)).rejects.toThrow(/Invalid channel count response/)
   })
 
-  it('accepts minimum valid version V6_5', async () => {
+  it('accepts minimum valid version LA-7.0.0', async () => {
     const lines = makeValidLines()
-    lines[0] = 'LogicAnalyzer_V6_5'
     const transport = createMockTransport({ lines })
     await transport.connect()
 
     const info = await parseInitResponse(transport)
-    expect(info.majorVersion).toBe(6)
-    expect(info.minorVersion).toBe(5)
+    expect(info.majorVersion).toBe(7)
+    expect(info.minorVersion).toBe(0)
   })
 })
 

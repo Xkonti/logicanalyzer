@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { OutputPacket, buildCaptureRequest } from './packets.js'
+import { OutputPacket, buildCaptureRequest, buildNetworkConfigRequest } from './packets.js'
 
 describe('OutputPacket.serialize', () => {
   it('wraps empty payload with header and footer', () => {
@@ -225,5 +225,124 @@ describe('buildCaptureRequest', () => {
     expect(serialized[serialized.length - 1]).toBe(0x55)
     // Command byte 0x01 is not a special byte, so it should appear at index 2
     expect(serialized[2]).toBe(0x01)
+  })
+})
+
+describe('buildNetworkConfigRequest', () => {
+  function makeConfig(overrides = {}) {
+    return {
+      ssid: 'MyNetwork',
+      password: 'secret123',
+      ipAddress: '192.168.4.1',
+      port: 4045,
+      hostname: 'logicanalyzer',
+      ...overrides,
+    }
+  }
+
+  it('produces exactly 150 bytes', () => {
+    expect(buildNetworkConfigRequest(makeConfig()).length).toBe(150)
+  })
+
+  it('encodes SSID as null-padded ASCII at offset 0', () => {
+    const result = buildNetworkConfigRequest(makeConfig({ ssid: 'test' }))
+    expect(result[0]).toBe(0x74) // 't'
+    expect(result[1]).toBe(0x65) // 'e'
+    expect(result[2]).toBe(0x73) // 's'
+    expect(result[3]).toBe(0x74) // 't'
+    // remaining bytes in field should be zero
+    for (let i = 4; i < 33; i++) {
+      expect(result[i]).toBe(0)
+    }
+  })
+
+  it('encodes password at offset 33', () => {
+    const result = buildNetworkConfigRequest(makeConfig({ password: 'pw' }))
+    expect(result[33]).toBe(0x70) // 'p'
+    expect(result[34]).toBe(0x77) // 'w'
+    for (let i = 35; i < 97; i++) {
+      expect(result[i]).toBe(0)
+    }
+  })
+
+  it('encodes IP address at offset 97', () => {
+    const result = buildNetworkConfigRequest(makeConfig({ ipAddress: '10.0.0.1' }))
+    expect(result[97]).toBe(0x31) // '1'
+    expect(result[98]).toBe(0x30) // '0'
+    expect(result[99]).toBe(0x2e) // '.'
+    expect(result[100]).toBe(0x30) // '0'
+    for (let i = 105; i < 113; i++) {
+      expect(result[i]).toBe(0)
+    }
+  })
+
+  it('has alignment padding byte at offset 113', () => {
+    const result = buildNetworkConfigRequest(makeConfig())
+    expect(result[113]).toBe(0)
+  })
+
+  it('encodes port as little-endian uint16 at offset 114', () => {
+    const result = buildNetworkConfigRequest(makeConfig({ port: 4045 }))
+    // 4045 = 0x0FCD → low byte 0xCD, high byte 0x0F
+    expect(result[114]).toBe(0xcd)
+    expect(result[115]).toBe(0x0f)
+  })
+
+  it('encodes hostname at offset 116', () => {
+    const result = buildNetworkConfigRequest(makeConfig({ hostname: 'myhost' }))
+    expect(result[116]).toBe(0x6d) // 'm'
+    expect(result[117]).toBe(0x79) // 'y'
+    expect(result[118]).toBe(0x68) // 'h'
+    expect(result[119]).toBe(0x6f) // 'o'
+    expect(result[120]).toBe(0x73) // 's'
+    expect(result[121]).toBe(0x74) // 't'
+    for (let i = 122; i < 149; i++) {
+      expect(result[i]).toBe(0)
+    }
+  })
+
+  it('handles empty hostname', () => {
+    const result = buildNetworkConfigRequest(makeConfig({ hostname: '' }))
+    for (let i = 116; i < 149; i++) {
+      expect(result[i]).toBe(0)
+    }
+  })
+
+  it('defaults hostname to empty string', () => {
+    const result = buildNetworkConfigRequest({
+      ssid: 'net',
+      password: 'pass',
+      ipAddress: '1.2.3.4',
+      port: 80,
+    })
+    for (let i = 116; i < 149; i++) {
+      expect(result[i]).toBe(0)
+    }
+  })
+
+  it('truncates SSID longer than 32 chars', () => {
+    const longSsid = 'A'.repeat(40)
+    const result = buildNetworkConfigRequest(makeConfig({ ssid: longSsid }))
+    // Should write 32 chars (max 33 field - 1 for null)
+    for (let i = 0; i < 32; i++) {
+      expect(result[i]).toBe(0x41) // 'A'
+    }
+    // Last byte of the 33-byte field should be null
+    expect(result[32]).toBe(0)
+  })
+
+  it('full round-trip: OutputPacket wrapping a NetworkConfigRequest', () => {
+    const reqBytes = buildNetworkConfigRequest(makeConfig())
+
+    const pkt = new OutputPacket()
+    pkt.addByte(0x02) // CMD_NETWORK_CONFIG
+    pkt.addBytes(reqBytes)
+
+    const serialized = pkt.serialize()
+    expect(serialized[0]).toBe(0x55)
+    expect(serialized[1]).toBe(0xaa)
+    expect(serialized[serialized.length - 2]).toBe(0xaa)
+    expect(serialized[serialized.length - 1]).toBe(0x55)
+    expect(serialized[2]).toBe(0x02)
   })
 })

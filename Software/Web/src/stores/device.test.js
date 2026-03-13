@@ -28,7 +28,7 @@ vi.mock('../core/driver/analyzer.js', () => {
     }
     getDeviceInfo() {
       return {
-        name: 'ANALYZER_V6_5',
+        name: 'LA-7.0.0',
         maxFrequency: 100000000,
         blastFrequency: 200000000,
         channels: 24,
@@ -103,7 +103,7 @@ describe('useDeviceStore', () => {
       const device = useDeviceStore()
       await device.connect()
 
-      expect(device.version).toBe('ANALYZER_V6_5')
+      expect(device.version).toBe('LA-7.0.0')
       expect(device.maxFrequency).toBe(100000000)
       expect(device.blastFrequency).toBe(200000000)
       expect(device.channelCount).toBe(24)

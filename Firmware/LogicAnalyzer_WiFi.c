@@ -26,6 +26,7 @@ struct tcp_pcb* clientPcb;
 
 bool apConnected = false;
 bool boot = false;
+static bool usb_was_connected = false;
 
 #define LED_ON() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1)
 #define LED_OFF() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0)
@@ -189,19 +190,33 @@ bool tryStartServer()
 
 bool tryConnectAP()
 {
-    if(cyw43_arch_wifi_connect_timeout_ms((const char*)wifiSettings.apName, (const char*)wifiSettings.passwd, CYW43_AUTH_WPA2_AES_PSK, 10000))
-        return false;
+    /* Try connecting in 2s chunks (5 × 2s = 10s total budget).
+     * Between attempts, pump the USB stack and check if a USB
+     * host opened the serial port — if so, abort early so the
+     * main loop can switch to WIFI_DISABLED without a long stall. */
+    for (int attempt = 0; attempt < 5; attempt++)
+    {
+        tud_task();
+        if (tud_cdc_connected())
+            return false;
 
-    ipaddr_aton((const char*)wifiSettings.ipAddress, &address);
+        if (!cyw43_arch_wifi_connect_timeout_ms(
+                (const char*)wifiSettings.apName,
+                (const char*)wifiSettings.passwd,
+                CYW43_AUTH_WPA2_AES_PSK, 2000))
+        {
+            ipaddr_aton((const char*)wifiSettings.ipAddress, &address);
+            netif_set_ipaddr(netif_list, &address);
 
-    netif_set_ipaddr(netif_list, &address);
+            if(wifiSettings.hostname[0] != '\0')
+                netif_set_hostname(netif_list, (const char*)wifiSettings.hostname);
 
-    if(wifiSettings.hostname[0] != '\0')
-        netif_set_hostname(netif_list, (const char*)wifiSettings.hostname);
+            apConnected = true;
+            return true;
+        }
+    }
 
-    apConnected = true;
-
-    return true;
+    return false;
 }
 
 void disconnectAP()
@@ -216,6 +231,9 @@ void disconnectAP()
 
 void processWifiMachine()
 {
+    if (currentState == WIFI_DISABLED)
+        return;
+
     switch (currentState)
     {
         case VALIDATE_SETTINGS:
@@ -280,7 +298,7 @@ void frontendEvent(void* event)
             killClient();
             stopServer();
             disconnectAP();
-            currentState = VALIDATE_SETTINGS;
+            currentState = usb_was_connected ? WIFI_DISABLED : VALIDATE_SETTINGS;
             break;
 
         case SEND_DATA:
@@ -297,9 +315,6 @@ void frontendEvent(void* event)
 /*  USB I/O functions — all run on Core 1                              */
 /* ------------------------------------------------------------------ */
 
-/* Track USB connection state for Core 0 notifications */
-static bool usb_was_connected = false;
-
 /* Read available USB data and push to Core 0 via usbToFrontend queue */
 static void usb_process_input(void)
 {
@@ -311,6 +326,18 @@ static void usb_process_input(void)
         evt.event = USB_CONNECTED;
         evt.dataLength = 0;
         event_push(&usbToFrontend, &evt);
+
+        /* Disable WiFi — USB takes priority */
+        if (currentState == TCP_CLIENT_CONNECTED)
+        {
+            EVENT_FROM_WIFI wifiEvt;
+            wifiEvt.event = DISCONNECTED;
+            event_push(&wifiToFrontend, &wifiEvt);
+        }
+        killClient();
+        stopServer();
+        disconnectAP();
+        currentState = WIFI_DISABLED;
     }
     else if (!connected && usb_was_connected)
     {
@@ -318,6 +345,9 @@ static void usb_process_input(void)
         evt.event = USB_DISCONNECTED;
         evt.dataLength = 0;
         event_push(&usbToFrontend, &evt);
+
+        /* Re-enable WiFi */
+        currentState = VALIDATE_SETTINGS;
     }
     usb_was_connected = connected;
 

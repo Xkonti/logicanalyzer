@@ -10,6 +10,7 @@ import {
   CAPTURE_MODE_16CH,
   CAPTURE_MODE_24CH,
   CMD_DEVICE_INIT,
+  CMD_NETWORK_CONFIG,
   CMD_BLINK_LED_ON,
   CMD_BLINK_LED_OFF,
   CMD_ENTER_BOOTLOADER,
@@ -19,11 +20,13 @@ import {
 import { createChannel } from './types.js'
 
 const INIT_LINES = [
-  'ANALYZER_V6_5',
+  'LA-7.0.0',
   'FREQ:100000000',
   'BLASTFREQ:200000000',
   'BUFFER:262144',
   'CHANNELS:24',
+  'SSID:TestNetwork',
+  'HOSTNAME:myanalyzer',
 ]
 
 /**
@@ -44,9 +47,9 @@ describe('AnalyzerDriver', () => {
   describe('connect', () => {
     it('stores device info from init handshake', async () => {
       const { driver } = await makeConnectedDriver()
-      expect(driver.version).toBe('ANALYZER_V6_5')
-      expect(driver.majorVersion).toBe(6)
-      expect(driver.minorVersion).toBe(5)
+      expect(driver.version).toBe('LA-7.0.0')
+      expect(driver.majorVersion).toBe(7)
+      expect(driver.minorVersion).toBe(0)
       expect(driver.maxFrequency).toBe(100000000)
       expect(driver.blastFrequency).toBe(200000000)
       expect(driver.bufferSize).toBe(262144)
@@ -141,7 +144,7 @@ describe('AnalyzerDriver', () => {
     it('returns info with 3 modeLimits', async () => {
       const { driver } = await makeConnectedDriver()
       const info = driver.getDeviceInfo()
-      expect(info.name).toBe('ANALYZER_V6_5')
+      expect(info.name).toBe('LA-7.0.0')
       expect(info.maxFrequency).toBe(100000000)
       expect(info.blastFrequency).toBe(200000000)
       expect(info.channels).toBe(24)
@@ -707,6 +710,30 @@ describe('AnalyzerDriver', () => {
 
       expect(result.started).toBe(false)
       expect(result.error).toBe('Device error: STREAM_ERROR')
+    })
+  })
+
+  describe('sendNetworkConfig', () => {
+    const netConfig = {
+      ssid: 'TestNetwork',
+      password: 'pass123',
+      ipAddress: '192.168.4.1',
+      port: 4045,
+      hostname: 'analyzer',
+    }
+
+    it('sends CMD_NETWORK_CONFIG and returns true on SETTINGS_SAVED', async () => {
+      const { driver, transport } = await makeConnectedDriver({ lines: ['SETTINGS_SAVED'] })
+      const result = await driver.sendNetworkConfig(netConfig)
+      expect(result).toBe(true)
+      const pkt = transport.writtenData[1]
+      expect(pkt[2]).toBe(CMD_NETWORK_CONFIG)
+    })
+
+    it('returns false on unexpected response', async () => {
+      const { driver } = await makeConnectedDriver({ lines: ['SOME_ERROR'] })
+      const result = await driver.sendNetworkConfig(netConfig)
+      expect(result).toBe(false)
     })
   })
 

@@ -3,7 +3,12 @@
  * Ports AnalyzerDriverBase + LogicAnalyzerDriver from SharedDriver.
  */
 
-import { OutputPacket, buildCaptureRequest, buildStreamRequest } from '../protocol/packets.js'
+import {
+  OutputPacket,
+  buildCaptureRequest,
+  buildStreamRequest,
+  buildNetworkConfigRequest,
+} from '../protocol/packets.js'
 
 function withTimeout(promise, ms, message) {
   return Promise.race([
@@ -23,6 +28,7 @@ import {
   CMD_STOP_CAPTURE,
   CMD_START_STREAM,
   CMD_STOP_STREAM,
+  CMD_NETWORK_CONFIG,
   CMD_ENTER_BOOTLOADER,
   CMD_BLINK_LED_ON,
   CMD_BLINK_LED_OFF,
@@ -47,6 +53,8 @@ export class AnalyzerDriver {
   #blastFrequency = 0
   #bufferSize = 0
   #channelCount = 0
+  #ssid = ''
+  #hostname = ''
   #capturing = false
   #streaming = false
 
@@ -103,6 +111,8 @@ export class AnalyzerDriver {
     this.#blastFrequency = info.blastFrequency
     this.#bufferSize = info.bufferSize
     this.#channelCount = info.channelCount
+    this.#ssid = info.ssid
+    this.#hostname = info.hostname
   }
 
   async disconnect() {
@@ -158,6 +168,8 @@ export class AnalyzerDriver {
       channels: this.#channelCount,
       bufferSize: this.#bufferSize,
       modeLimits: [this.getLimits(range8), this.getLimits(range16), this.getLimits(range24)],
+      ssid: this.#ssid,
+      hostname: this.#hostname,
     }
   }
 
@@ -398,6 +410,34 @@ export class AnalyzerDriver {
     pkt.addByte(CMD_ENTER_BOOTLOADER)
     await this.#transport.write(pkt.serialize())
     return parseResponseLine(this.#transport, 'RESTARTING_BOOTLOADER')
+  }
+
+  /**
+   * Sends network configuration to the device.
+   * Ports SendNetworkConfig from LogicAnalyzerDriver.cs lines 870-906.
+   *
+   * @param {Object} config
+   * @param {string} config.ssid
+   * @param {string} config.password
+   * @param {string} config.ipAddress
+   * @param {number} config.port
+   * @param {string} [config.hostname='']
+   * @returns {Promise<boolean>} true if device responds "SETTINGS_SAVED"
+   */
+  async sendNetworkConfig({ ssid, password, ipAddress, port, hostname = '' }) {
+    if (this.#capturing || this.#streaming) throw new Error('Device is busy')
+    if (!this.#transport?.connected) throw new Error('Not connected')
+
+    const pkt = new OutputPacket()
+    pkt.addByte(CMD_NETWORK_CONFIG)
+    pkt.addBytes(buildNetworkConfigRequest({ ssid, password, ipAddress, port, hostname }))
+    await this.#transport.write(pkt.serialize())
+
+    return await withTimeout(
+      parseResponseLine(this.#transport, 'SETTINGS_SAVED'),
+      5000,
+      'Timeout: no response from device within 5s',
+    )
   }
 
   /**

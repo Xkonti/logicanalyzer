@@ -147,7 +147,7 @@
         typedef struct _EVENT_TO_USB
         {
             FRONTEND_USB_EVENT event;
-            char data[32];
+            char data[48];
             uint8_t dataLength;
 
         } EVENT_TO_USB;

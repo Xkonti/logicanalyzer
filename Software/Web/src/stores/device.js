@@ -91,6 +91,20 @@ export const useDeviceStore = defineStore('device', () => {
     return result
   }
 
+  async function sendNetworkConfig(config) {
+    if (!driver.value) {
+      error.value = 'Not connected'
+      return false
+    }
+    error.value = null
+    try {
+      return await driver.value.sendNetworkConfig(config)
+    } catch (err) {
+      error.value = err.message
+      return false
+    }
+  }
+
   return {
     driver,
     connected,
@@ -108,6 +122,7 @@ export const useDeviceStore = defineStore('device', () => {
     blinkLed,
     stopBlinkLed,
     enterBootloader,
+    sendNetworkConfig,
   }
 })
 

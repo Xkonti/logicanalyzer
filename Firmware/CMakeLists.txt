@@ -47,8 +47,8 @@ pico_generate_pio_header(${PROJECT_NAME}
 )
 
 pico_set_program_name(LogicAnalyzer "LogicAnalyzer")
-pico_set_program_version(LogicAnalyzer "6.5")
-add_compile_definitions(FIRMWARE_VERSION="V6_5")
+pico_set_program_version(LogicAnalyzer "7.0.0")
+add_compile_definitions(FIRMWARE_VERSION="7.0.0")
 
 pico_enable_stdio_uart(LogicAnalyzer 0)
 pico_enable_stdio_usb(LogicAnalyzer 1)

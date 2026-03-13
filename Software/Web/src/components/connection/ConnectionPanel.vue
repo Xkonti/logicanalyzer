@@ -23,27 +23,13 @@
     />
 
     <template v-else>
-      <q-chip color="positive" text-color="white" icon="check_circle" clickable dense>
+      <q-chip color="positive" text-color="white" icon="check_circle" dense>
         {{ device.deviceVersion }}
-        <q-menu anchor="bottom middle" self="top middle">
-          <q-card flat bordered class="q-pa-sm">
-            <q-list dense>
-              <q-item>
-                <q-item-section>Channels</q-item-section>
-                <q-item-section side>{{ device.channelCount }}</q-item-section>
-              </q-item>
-              <q-item>
-                <q-item-section>Max Frequency</q-item-section>
-                <q-item-section side>{{ formatFrequency(device.maxFrequency) }}</q-item-section>
-              </q-item>
-              <q-item>
-                <q-item-section>Buffer Size</q-item-section>
-                <q-item-section side>{{ formatBytes(device.bufferSize) }}</q-item-section>
-              </q-item>
-            </q-list>
-          </q-card>
-        </q-menu>
       </q-chip>
+
+      <q-btn flat round dense icon="settings" color="grey-4" @click="showDeviceDialog = true">
+        <q-tooltip>Device Info & Settings</q-tooltip>
+      </q-btn>
 
       <q-btn
         color="negative"
@@ -66,24 +52,16 @@
     >
       {{ device.error }}
     </q-chip>
+
+    <DeviceInfoDialog v-model="showDeviceDialog" />
   </div>
 </template>
 
 <script setup>
+import { ref } from 'vue'
 import { useDevice } from 'src/composables/useDevice.js'
+import DeviceInfoDialog from './DeviceInfoDialog.vue'
 
 const device = useDevice()
-
-function formatFrequency(hz) {
-  if (hz >= 1_000_000_000) return `${(hz / 1_000_000_000).toFixed(hz % 1_000_000_000 ? 1 : 0)} GHz`
-  if (hz >= 1_000_000) return `${(hz / 1_000_000).toFixed(hz % 1_000_000 ? 1 : 0)} MHz`
-  if (hz >= 1_000) return `${(hz / 1_000).toFixed(hz % 1_000 ? 1 : 0)} kHz`
-  return `${hz} Hz`
-}
-
-function formatBytes(bytes) {
-  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(bytes % 1_048_576 ? 1 : 0)} MB`
-  if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(bytes % 1_024 ? 1 : 0)} KB`
-  return `${bytes} B`
-}
+const showDeviceDialog = ref(false)
 </script>

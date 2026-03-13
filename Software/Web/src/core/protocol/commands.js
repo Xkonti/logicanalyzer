@@ -35,9 +35,10 @@ export const DEFAULT_BUFFER_SIZE = 1048576 // 1MB — Web Serial default is 255,
 export const DEFAULT_VENDOR_ID = 0x1209
 export const DEFAULT_PRODUCT_ID = 0x3020
 
-// Minimum device version (VersionValidator.cs)
-export const MIN_MAJOR_VERSION = 6
-export const MIN_MINOR_VERSION = 5
+// Minimum device version
+export const MIN_MAJOR_VERSION = 7
+export const MIN_MINOR_VERSION = 0
+export const MIN_PATCH_VERSION = 0
 
 // Trigger delay constants (CaptureModes.cs TriggerDelays)
 export const COMPLEX_TRIGGER_DELAY = 5

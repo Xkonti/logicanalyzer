@@ -1,30 +1,34 @@
-import { MIN_MAJOR_VERSION, MIN_MINOR_VERSION } from './commands.js'
+import { MIN_MAJOR_VERSION, MIN_MINOR_VERSION, MIN_PATCH_VERSION } from './commands.js'
 
-const VERSION_REGEX = /.*?V(\d+)_(\d+)$/
+const VERSION_REGEX = /^LA-(\d+)\.(\d+)\.(\d+)$/
 const FREQ_REGEX = /^FREQ:(\d+)$/
 const BLAST_FREQ_REGEX = /^BLASTFREQ:(\d+)$/
 const BUFFER_REGEX = /^BUFFER:(\d+)$/
 const CHANNELS_REGEX = /^CHANNELS:(\d+)$/
+const SSID_REGEX = /^SSID:(.*)$/
+const HOSTNAME_REGEX = /^HOSTNAME:(.*)$/
 
 /**
- * Validates a device version string.
- * Ports VersionValidator.cs — regex and min version check.
+ * Validates a device version string in "LA-major.minor.patch" format.
  *
  * @param {string} versionString
- * @returns {{ valid: boolean, major: number, minor: number }}
+ * @returns {{ valid: boolean, major: number, minor: number, patch: number }}
  */
 export function validateVersion(versionString) {
   const match = VERSION_REGEX.exec(versionString || '')
   if (!match) {
-    return { valid: false, major: 0, minor: 0 }
+    return { valid: false, major: 0, minor: 0, patch: 0 }
   }
 
   const major = parseInt(match[1], 10)
   const minor = parseInt(match[2], 10)
+  const patch = parseInt(match[3], 10)
   const valid =
-    major > MIN_MAJOR_VERSION || (major === MIN_MAJOR_VERSION && minor >= MIN_MINOR_VERSION)
+    major > MIN_MAJOR_VERSION ||
+    (major === MIN_MAJOR_VERSION &&
+      (minor > MIN_MINOR_VERSION || (minor === MIN_MINOR_VERSION && patch >= MIN_PATCH_VERSION)))
 
-  return { valid, major, minor }
+  return { valid, major, minor, patch }
 }
 
 /**
@@ -36,6 +40,8 @@ export function validateVersion(versionString) {
  * @property {number} blastFrequency
  * @property {number} bufferSize
  * @property {number} channelCount
+ * @property {string} ssid - Configured WiFi SSID (empty if none)
+ * @property {string} hostname - Configured hostname (empty if none)
  */
 
 /**
@@ -43,11 +49,13 @@ export function validateVersion(versionString) {
  * Ports LogicAnalyzerDriver.cs lines 133-189 (InitSerialPort handshake).
  *
  * Expected line order:
- *   1. Version string (e.g., "ANALYZER_V6_5")
+ *   1. Version string (e.g., "LA-7.0.0")
  *   2. "FREQ:100000000"
  *   3. "BLASTFREQ:200000000"
  *   4. "BUFFER:262144"
  *   5. "CHANNELS:24"
+ *   6. "SSID:<name>" (may be empty)
+ *   7. "HOSTNAME:<name>" (may be empty)
  *
  * @param {import('../transport/types.js').ITransport} transport
  * @returns {Promise<DeviceInfo>}
@@ -93,6 +101,18 @@ export async function parseInitResponse(transport) {
     throw new Error(`Invalid channel count response: "${chanLine}"`)
   }
 
+  const ssidLine = await transport.readLine()
+  const ssidMatch = SSID_REGEX.exec(ssidLine)
+  if (!ssidMatch) {
+    throw new Error(`Invalid SSID response: "${ssidLine}"`)
+  }
+
+  const hostnameLine = await transport.readLine()
+  const hostnameMatch = HOSTNAME_REGEX.exec(hostnameLine)
+  if (!hostnameMatch) {
+    throw new Error(`Invalid hostname response: "${hostnameLine}"`)
+  }
+
   return {
     version: versionLine,
     majorVersion: ver.major,
@@ -101,6 +121,8 @@ export async function parseInitResponse(transport) {
     blastFrequency: parseInt(blastMatch[1], 10),
     bufferSize: parseInt(bufMatch[1], 10),
     channelCount: parseInt(chanMatch[1], 10),
+    ssid: ssidMatch[1],
+    hostname: hostnameMatch[1],
   }
 }
 

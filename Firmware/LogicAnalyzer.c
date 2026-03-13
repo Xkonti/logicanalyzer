@@ -119,9 +119,12 @@ void sendResponse(const char* response, bool toWiFi)
     {
         EVENT_FROM_FRONTEND evt;
         evt.event = SEND_DATA;
-        evt.dataLength = strlen(response);
-        memset(evt.data, 0, 32);
-        memcpy(evt.data, response, evt.dataLength);
+        uint8_t len = strlen(response);
+        if (len > sizeof(evt.data))
+            len = sizeof(evt.data);
+        evt.dataLength = len;
+        memset(evt.data, 0, sizeof(evt.data));
+        memcpy(evt.data, response, len);
         event_push(&frontendToWifi, &evt);
     }
     else
@@ -231,7 +234,7 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                             sendResponse("ERR_UNKNOWN_MSG\n", fromWiFi);
                         else
                         {
-                            sendResponse("LOGIC_ANALYZER_"BOARD_NAME"_"FIRMWARE_VERSION"\n", fromWiFi);
+                            sendResponse("LA-"FIRMWARE_VERSION"\n", fromWiFi);
 
                             char msg[64];
                             
@@ -242,6 +245,23 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                             sprintf(msg, "BUFFER:%d\n", CAPTURE_BUFFER_SIZE);
                             sendResponse(msg, fromWiFi);
                             sprintf(msg, "CHANNELS:%d\n", MAX_CHANNELS);
+                            sendResponse(msg, fromWiFi);
+                            // Copy with forced null-termination and sanitize
+                            // uninitialized flash (0xFF bytes)
+                            char safeBuf[34];
+                            memcpy(safeBuf, (const char*)wifiSettings.apName, 33);
+                            safeBuf[33] = '\0';
+                            for (int i = 0; i < 33; i++) {
+                                if ((uint8_t)safeBuf[i] == 0xFF) { safeBuf[i] = '\0'; break; }
+                            }
+                            sprintf(msg, "SSID:%s\n", safeBuf);
+                            sendResponse(msg, fromWiFi);
+                            memcpy(safeBuf, (const char*)wifiSettings.hostname, 33);
+                            safeBuf[33] = '\0';
+                            for (int i = 0; i < 33; i++) {
+                                if ((uint8_t)safeBuf[i] == 0xFF) { safeBuf[i] = '\0'; break; }
+                            }
+                            sprintf(msg, "HOSTNAME:%s\n", safeBuf);
                             sendResponse(msg, fromWiFi);
                         }
                         break;
@@ -283,7 +303,11 @@ void processData(uint8_t* data, uint length, bool fromWiFi)
                         WIFI_SETTINGS settings;
                         settings.checksum = 0;
                         memcpy(settings.apName, wReq->apName, 33);
-                        memcpy(settings.passwd, wReq->passwd, 64);
+                        // Empty password = keep existing (device doesn't report password over handshake)
+                        if (wReq->passwd[0] == '\0')
+                            memcpy(settings.passwd, (const char*)wifiSettings.passwd, 64);
+                        else
+                            memcpy(settings.passwd, wReq->passwd, 64);
                         memcpy(settings.ipAddress, wReq->ipAddress, 16);
                         settings.port = wReq->port;
                         memcpy(settings.hostname, wReq->hostname, 33);
