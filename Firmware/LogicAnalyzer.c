@@ -493,8 +493,7 @@ void wifiEvent(void* event)
 
 /// @brief Receives and processes input from the host application (when connected through WiFi)
 /// @param skipProcessing If true the received data is not processed (used for cleanup)
-/// @return True if anything is received, false if not
-bool processWiFiInput(bool skipProcessing)
+void processWiFiInput(bool skipProcessing)
 {
     if(skipProcessing)
     {
@@ -504,8 +503,6 @@ bool processWiFiInput(bool skipProcessing)
     event_process_queue(&wifiToFrontend, &wifiEventBuffer, 8);
 
     skipWiFiData = false;
-
-    return false;
 }
 
 /* USB event buffer for Core 0 processing */

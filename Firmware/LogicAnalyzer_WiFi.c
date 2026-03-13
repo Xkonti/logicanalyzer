@@ -33,6 +33,7 @@ static bool usb_was_connected = false;
 static char ws_handshake_buf[512];
 static uint16_t ws_handshake_pos = 0;
 static WS_FRAME_PARSER ws_parser;
+static absolute_time_t ws_handshake_deadline;
 
 #define LED_ON() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1)
 #define LED_OFF() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0)
@@ -285,6 +286,7 @@ err_t acceptConnection(void *arg, struct tcp_pcb *client_pcb, err_t err)
      * the upgrade handshake completes successfully. */
     currentState = WS_HANDSHAKE_PENDING;
     ws_handshake_pos = 0;
+    ws_handshake_deadline = make_timeout_time_ms(5000);
     ws_parser_init(&ws_parser);
 
     return ERR_OK;
@@ -304,6 +306,7 @@ bool tryStartServer()
         return false;
 
     tcp_accept(serverPcb, acceptConnection);
+    return true;
 }
 
 bool tryConnectAP()
@@ -393,6 +396,10 @@ void processWifiMachine()
         case STARTING_TCP_SERVER:
             if(tryStartServer())
                 currentState = WAITING_TCP_CLIENT;
+            break;
+        case WS_HANDSHAKE_PENDING:
+            if (time_reached(ws_handshake_deadline))
+                killClient();
             break;
         default:
             break;

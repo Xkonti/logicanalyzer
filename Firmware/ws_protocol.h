@@ -18,7 +18,7 @@ typedef enum {
     WS_PARSE_NEED_PAYLOAD
 } WS_PARSE_STATE;
 
-#define WS_MAX_PAYLOAD 180
+#define WS_MAX_PAYLOAD 256
 
 typedef struct {
     WS_PARSE_STATE state;
