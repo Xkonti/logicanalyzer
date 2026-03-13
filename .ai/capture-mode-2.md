@@ -57,7 +57,7 @@ The capture pipeline consists of:
 ## PIO Assembly Programs
 
 All PIO programs are defined in:
-**`Firmware/LogicAnalyzer_V2/LogicAnalyzer.pio`**
+**`Firmware/LogicAnalyzer.pio`**
 
 ### BLAST_CAPTURE
 **Lines 2-12.** The simplest capture program. Runs at a 1:1 clock divider (one PIO cycle = one sample), achieving the highest possible frequency.

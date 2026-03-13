@@ -13,7 +13,7 @@ The firmware supports two transport mechanisms: **USB CDC serial** and **WiFi (T
 - **Implementation:** TinyUSB CDC device class. The Pico presents itself as a USB serial device with vendor ID `0x1209` and product ID `0x3020`.
 - **Baud rate:** 115200 (configured by the host; see `Software/Web/src/core/protocol/commands.js` line 33).
 - **Input path:** During idle, `processUSBInput()` reads one byte at a time via `getchar_timeout_us(0)` (stdio). During streaming/capture transfer, `stdio_usb` is deinitialized and direct TinyUSB calls are used instead (`processUSBInputDirect()` via `tud_cdc_read()`, and `cdc_transfer()` for output).
-  - `Firmware/LogicAnalyzer_V2/LogicAnalyzer.c` lines 499-536.
+  - `Firmware/LogicAnalyzer.c` lines 499-536.
 - **Output path for text responses:** `printf()` via stdio (calls `sendResponse()`, line 171).
 - **Output path for binary data:** `cdc_transfer()` (lines 177-207), which loops over `tud_cdc_write()` with flush until all bytes are sent.
 - **Host side:** The web client uses the Web Serial API (`SerialTransport` class at `Software/Web/src/core/transport/serial.js`). It opens the port with a 1 MB buffer size (line 68), sets RTS/DTR signals (line 70-73), waits 200 ms for firmware boot, drains pending data, then begins normal communication.
@@ -21,10 +21,10 @@ The firmware supports two transport mechanisms: **USB CDC serial** and **WiFi (T
 ### 1.2 WiFi (TCP)
 
 - **Enabled by:** `USE_CYGW_WIFI` compile flag (Pico W and Pico 2 W WiFi builds).
-- **Architecture:** A dual-core design where **Core 0** runs the main protocol logic and **Core 1** runs the WiFi/lwIP stack (`runWiFiCore()` at `Firmware/LogicAnalyzer_V2/LogicAnalyzer_WiFi.c` line 295).
-- **Inter-core communication:** Two event queues (`wifiToFrontend` and `frontendToWifi`) using a `queue_t`-based event machine (`Firmware/LogicAnalyzer_V2/Event_Machine.h`). Events carry up to 128 bytes (WiFi-to-frontend) or 32 bytes (frontend-to-WiFi) of data.
+- **Architecture:** A dual-core design where **Core 0** runs the main protocol logic and **Core 1** runs the WiFi/lwIP stack (`runWiFiCore()` at `Firmware/LogicAnalyzer_WiFi.c` line 295).
+- **Inter-core communication:** Two event queues (`wifiToFrontend` and `frontendToWifi`) using a `queue_t`-based event machine (`Firmware/Event_Machine.h`). Events carry up to 128 bytes (WiFi-to-frontend) or 32 bytes (frontend-to-WiFi) of data.
 - **Connection flow:**
-  1. Core 1 initializes CYW43, connects to the configured AP, binds a TCP server on the configured port (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_WiFi.c` lines 173-187).
+  1. Core 1 initializes CYW43, connects to the configured AP, binds a TCP server on the configured port (`Firmware/LogicAnalyzer_WiFi.c` lines 173-187).
   2. When a TCP client connects, it pushes a `CONNECTED` event to Core 0. Core 0 sets `usbDisabled = true`, disabling USB input processing (`LogicAnalyzer.c` line 571-572).
   3. Incoming TCP data arrives via lwIP callback `serverReceiveData()` (line 118), chunked into 128-byte `DATA_RECEIVED` events pushed to Core 0.
   4. Outgoing data is pushed from Core 0 as `SEND_DATA` events (32 bytes max per event) to Core 1, which calls `tcp_write()` (line 99).
@@ -229,7 +229,7 @@ Reason codes: `DONE`, `OVERFLOW`, `DISCONN`, `TIMEOUT` (`LogicAnalyzer_Stream.c`
 
 ### 5.1 CAPTURE_REQUEST (56 bytes, C struct with natural alignment)
 
-Defined at `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h` lines 9-42. Built by `buildCaptureRequest()` at `Software/Web/src/core/protocol/packets.js` lines 119-145.
+Defined at `Firmware/LogicAnalyzer_Structs.h` lines 9-42. Built by `buildCaptureRequest()` at `Software/Web/src/core/protocol/packets.js` lines 119-145.
 
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
@@ -386,16 +386,16 @@ Non-WiFi builds respond to commands `0x02` and `0x03` with `ERR_UNSUPPORTED\n`.
 
 | File | Role |
 |------|------|
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer.c` | Main loop, frame parsing, command dispatch, USB/WiFi I/O |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h` | C struct definitions for all request/response types |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c` | Streaming mode: PIO/DMA setup, Core 1 compression, send loop |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.h` | Stream API declarations |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Capture.h` | Capture API declarations (simple, complex, fast, blast) |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_WiFi.c` | WiFi Core 1 loop: TCP server, lwIP callbacks, event handling |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_WiFi.h` | WiFi state machine enum |
-| `Firmware/LogicAnalyzer_V2/Event_Machine.h` | Inter-core event queue mechanism |
-| `Firmware/LogicAnalyzer_V2/Shared_Buffers.h` | Shared variables between cores (WiFi settings, event machines) |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Board_Settings.h` | Per-board compile-time configuration |
+| `Firmware/LogicAnalyzer.c` | Main loop, frame parsing, command dispatch, USB/WiFi I/O |
+| `Firmware/LogicAnalyzer_Structs.h` | C struct definitions for all request/response types |
+| `Firmware/LogicAnalyzer_Stream.c` | Streaming mode: PIO/DMA setup, Core 1 compression, send loop |
+| `Firmware/LogicAnalyzer_Stream.h` | Stream API declarations |
+| `Firmware/LogicAnalyzer_Capture.h` | Capture API declarations (simple, complex, fast, blast) |
+| `Firmware/LogicAnalyzer_WiFi.c` | WiFi Core 1 loop: TCP server, lwIP callbacks, event handling |
+| `Firmware/LogicAnalyzer_WiFi.h` | WiFi state machine enum |
+| `Firmware/Event_Machine.h` | Inter-core event queue mechanism |
+| `Firmware/Shared_Buffers.h` | Shared variables between cores (WiFi settings, event machines) |
+| `Firmware/LogicAnalyzer_Board_Settings.h` | Per-board compile-time configuration |
 | `Software/Web/src/core/protocol/commands.js` | Command byte constants, framing constants |
 | `Software/Web/src/core/protocol/packets.js` | `OutputPacket` (framing/escaping), `buildCaptureRequest()`, `buildStreamRequest()` |
 | `Software/Web/src/core/protocol/parser.js` | Response parsers: init handshake, capture data, generic response lines |

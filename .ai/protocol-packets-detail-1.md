@@ -622,7 +622,7 @@ Before compression, interleaved DMA samples are transposed into per-channel bits
 
 ## 9. Firmware Struct Definitions
 
-Source: `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h`
+Source: `Firmware/LogicAnalyzer_Structs.h`
 
 ### CAPTURE_REQUEST
 

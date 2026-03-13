@@ -20,12 +20,12 @@ The system uses a **three-stage pipeline** spread across both CPU cores:
 
 The host sends a binary-framed command with command byte `10` (decimal) to start streaming. The binary frame protocol uses `0x55 0xAA` as start delimiter and `0xAA 0x55` as end delimiter, with `0xF0` as an escape character.
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer.c`, lines 435-458
+**File:** `Firmware/LogicAnalyzer.c`, lines 435-458
 
 The command payload is deserialized as a `STREAM_REQUEST` struct:
 
 ```c
-// File: Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h, lines 44-55
+// File: Firmware/LogicAnalyzer_Structs.h, lines 44-55
 typedef struct _STREAM_REQUEST
 {
     uint8_t channels[32];     // Channels to capture
@@ -38,7 +38,7 @@ typedef struct _STREAM_REQUEST
 The main loop validates the request and calls `StartStream()`:
 
 ```c
-// File: Firmware/LogicAnalyzer_V2/LogicAnalyzer.c, lines 435-458
+// File: Firmware/LogicAnalyzer.c, lines 435-458
 case 10: // Start stream
 {
     if(capturing || streaming_active)
@@ -59,7 +59,7 @@ case 10: // Start stream
 
 ### 1.2 StartStream() Initialization
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 225-333
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 225-333
 
 `StartStream()` performs the following steps in order:
 
@@ -106,7 +106,7 @@ case 10: // Start stream
 
 Streaming reuses the `BLAST_CAPTURE` PIO program, which is the simplest capture program in the firmware.
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer.pio`, lines 2-12
+**File:** `Firmware/LogicAnalyzer.pio`, lines 2-12
 
 ```
 .program BLAST_CAPTURE
@@ -129,7 +129,7 @@ The `.wrap` directive causes the program to loop back to offset 1 indefinitely, 
 
 For streaming, the trigger instruction is irrelevant. The PIO state machine's program counter is initialized to `stream_pio_offset + 1`, skipping the `jmp pin LOOP` instruction entirely and starting continuous capture immediately.
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 207-216
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 207-216
 
 ```c
 /*
@@ -146,7 +146,7 @@ pio_sm_init(stream_pio, stream_sm, stream_pio_offset + 1, &smConfig);
 
 ### 2.3 PIO Configuration Details
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 178-218
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 178-218
 
 - Uses `pio0`.
 - Input pins start at `INPUT_PIN_BASE` (typically GPIO 2).
@@ -163,7 +163,7 @@ The PIO always captures a full 32-bit word of GPIO state. Only the relevant bits
 
 ### 3.1 Ring Buffer Layout
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.h`, lines 8-12
+**File:** `Firmware/LogicAnalyzer_Stream.h`, lines 8-12
 
 ```c
 #define STREAM_SLOTS            8
@@ -174,7 +174,7 @@ The PIO always captures a full 32-bit word of GPIO state. Only the relevant bits
 
 The ring buffer consists of 8 slots, each capable of holding up to 1024 samples at 4 bytes/sample (24-channel mode). The actual number of bytes written per slot depends on the capture mode and chunk size.
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 28-30
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 28-30
 
 ```c
 static uint8_t  stream_input[STREAM_SLOTS][STREAM_INPUT_SLOT_SIZE]  __attribute__((aligned(4)));
@@ -188,7 +188,7 @@ static uint32_t stream_output_size[STREAM_SLOTS];
 
 ### 3.2 Two Chained DMA Channels
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 91-137
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 91-137
 
 Two DMA channels (`stream_dma0` and `stream_dma1`) are configured with mutual chaining:
 
@@ -210,7 +210,7 @@ Initial configuration (lines 130-136):
 
 ### 3.3 DMA Interrupt Handler: Rotating Write Addresses
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 59-85
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 59-85
 
 The DMA ISR (`stream_dma_handler`) is marked `__not_in_flash_func` to run from SRAM for deterministic latency.
 
@@ -251,7 +251,7 @@ void __not_in_flash_func(stream_dma_handler)(void)
 
 ### 4.1 Compression Loop
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 143-172
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 143-172
 
 Core 1 runs a tight loop that processes completed DMA slots:
 
@@ -293,7 +293,7 @@ Key aspects:
 
 ### 4.2 Bus Priority Optimization
 
-**File:** `Firmware/LogicAnalyzer_V2/stream_compress.c`, lines 371-382
+**File:** `Firmware/stream_compress.c`, lines 371-382
 
 Core 1 sets itself to high bus priority during compression:
 
@@ -307,7 +307,7 @@ This gives Core 1 priority over DMA when they contend for the same SRAM bank, wh
 
 ### 4.3 Compression Algorithm
 
-**File:** `Firmware/LogicAnalyzer_V2/stream_compress.c`
+**File:** `Firmware/stream_compress.c`
 
 The compression is a multi-stage pipeline optimized for Cortex-M33:
 
@@ -376,12 +376,12 @@ Each compressed chunk has:
 
 ### 5.1 RunStreamSendLoop()
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 374-510
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 374-510
 
 After `StartStream()` returns, the main loop in `LogicAnalyzer.c` (lines 852-861) calls `RunStreamSendLoop()`, which blocks until streaming ends:
 
 ```c
-// File: Firmware/LogicAnalyzer_V2/LogicAnalyzer.c, lines 852-861
+// File: Firmware/LogicAnalyzer.c, lines 852-861
 else if(streaming_active)
 {
     RunStreamSendLoop(usbDisabled);  // or false if no WiFi
@@ -476,7 +476,7 @@ Host Application
 
 Three monotonically-increasing counters coordinate the pipeline:
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 32-35
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 32-35
 
 | Counter | Writer | Reader | Meaning |
 |---------|--------|--------|---------|
@@ -498,7 +498,7 @@ The `__dmb()` on line 162 ensures that Core 0 sees the compressed data written b
 
 The host sends command byte `11`:
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer.c`, lines 461-462
+**File:** `Firmware/LogicAnalyzer.c`, lines 461-462
 
 ```c
 case 11: // Stop stream
@@ -508,7 +508,7 @@ case 11: // Stop stream
 
 `StopStream()` simply sets `streaming = false`:
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 336-339
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 336-339
 
 ```c
 void StopStream(void)
@@ -529,7 +529,7 @@ This causes:
 
 ### 8.3 Cleanup
 
-**File:** `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 341-366
+**File:** `Firmware/LogicAnalyzer_Stream.c`, lines 341-366
 
 `CleanupStream()` is called after `RunStreamSendLoop()` returns:
 
@@ -572,7 +572,7 @@ The 1-3 MHz range mentioned in the project description reflects these practical 
 
 ### 9.3 Chunk Size Selection
 
-**File:** `Firmware/LogicAnalyzer_V2/stream_compress.c`, lines 555-572
+**File:** `Firmware/stream_compress.c`, lines 555-572
 
 The firmware provides a helper to select chunk size based on sample rate, targeting 5 updates per second for the real-time display:
 
@@ -643,12 +643,12 @@ Command byte `0x0B` = 11 decimal = stop stream.
 
 | File | Purpose |
 |------|---------|
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c` | Streaming state machine, DMA setup, PIO setup, send loop |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.h` | Stream API declarations, ring buffer constants |
-| `Firmware/LogicAnalyzer_V2/stream_compress.c` | Compression algorithm (transpose, classify, encode) |
-| `Firmware/LogicAnalyzer_V2/stream_compress.h` | Compression API, nibble prefix code definitions, header encoding constants |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer.pio` | PIO programs including BLAST_CAPTURE |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h` | STREAM_REQUEST struct definition |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer.c` | Main loop, command parsing (cmd 10/11), transport functions |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Board_Settings.h` | Board-specific pin maps, frequencies, buffer sizes |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Capture.h` | CHANNEL_MODE enum, pinMap declaration |
+| `Firmware/LogicAnalyzer_Stream.c` | Streaming state machine, DMA setup, PIO setup, send loop |
+| `Firmware/LogicAnalyzer_Stream.h` | Stream API declarations, ring buffer constants |
+| `Firmware/stream_compress.c` | Compression algorithm (transpose, classify, encode) |
+| `Firmware/stream_compress.h` | Compression API, nibble prefix code definitions, header encoding constants |
+| `Firmware/LogicAnalyzer.pio` | PIO programs including BLAST_CAPTURE |
+| `Firmware/LogicAnalyzer_Structs.h` | STREAM_REQUEST struct definition |
+| `Firmware/LogicAnalyzer.c` | Main loop, command parsing (cmd 10/11), transport functions |
+| `Firmware/LogicAnalyzer_Board_Settings.h` | Board-specific pin maps, frequencies, buffer sizes |
+| `Firmware/LogicAnalyzer_Capture.h` | CHANNEL_MODE enum, pinMap declaration |

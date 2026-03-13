@@ -26,7 +26,7 @@ The compression is a cherry-pick of techniques from four prototype implementatio
 PIO capture -> DMA ping-pong buffers -> [Core 1] bit-transpose -> classify -> run-detect -> encode -> [Core 0] USB/WiFi
 ```
 
-Source: `Firmware/LogicAnalyzer_V2/stream_compress.c`, lines 1-18.
+Source: `Firmware/stream_compress.c`, lines 1-18.
 
 ### Stage 1: Bit Transpose (Delta-Swap 8x8 Butterfly)
 
@@ -153,7 +153,7 @@ Each 2-bit field is one of:
 
 ### Packetization for Transmission
 
-Compressed chunks are transmitted with a simple length-prefixed framing protocol (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 386-403):
+Compressed chunks are transmitted with a simple length-prefixed framing protocol (`Firmware/LogicAnalyzer_Stream.c`, lines 386-403):
 
 ```
 [2 bytes: compressed size, little-endian uint16]
@@ -293,16 +293,16 @@ Runs cannot span chunk boundaries. Each chunk is compressed independently, so a 
 
 | File | Purpose |
 |------|---------|
-| `Firmware/LogicAnalyzer_V2/stream_compress.h` | Public API, constants, nibble prefix code definitions |
-| `Firmware/LogicAnalyzer_V2/stream_compress.c` | Compression implementation (transpose, classify, encode) |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c` | Streaming pipeline (DMA, Core 1 loop, USB send loop, framing) |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.h` | Ring buffer sizing constants |
+| `Firmware/stream_compress.h` | Public API, constants, nibble prefix code definitions |
+| `Firmware/stream_compress.c` | Compression implementation (transpose, classify, encode) |
+| `Firmware/LogicAnalyzer_Stream.c` | Streaming pipeline (DMA, Core 1 loop, USB send loop, framing) |
+| `Firmware/LogicAnalyzer_Stream.h` | Ring buffer sizing constants |
 | `Software/Web/src/core/compression/decoder.js` | JavaScript decompressor |
 | `Software/Web/src/core/compression/decoder.test.js` | Decompressor unit tests |
 | `Software/Web/src/core/compression/test-patterns.js` | Test pattern generators (JS equivalents of firmware patterns) |
 | `Software/Web/src/core/driver/analyzer.js` | Driver integration (read loop, chunk framing) |
 | `Software/Web/src/stores/stream.js` | Stream state management, bitstream unpacking |
-| `Firmware/LogicAnalyzer_V2/stream_compress_minimal.c.ref` | Prototype: delta-swap transpose + bit accumulator |
-| `Firmware/LogicAnalyzer_V2/stream_compress_hwaccel.c.ref` | Prototype: CLZ/CTZ run detection + bus priority |
-| `Firmware/LogicAnalyzer_V2/stream_compress_bitmagic.c.ref` | Prototype: greedy raw group code selection |
-| `Firmware/LogicAnalyzer_V2/stream_compress_batched.c.ref` | Prototype: batched processing |
+| `Firmware/stream_compress_minimal.c.ref` | Prototype: delta-swap transpose + bit accumulator |
+| `Firmware/stream_compress_hwaccel.c.ref` | Prototype: CLZ/CTZ run detection + bus priority |
+| `Firmware/stream_compress_bitmagic.c.ref` | Prototype: greedy raw group code selection |
+| `Firmware/stream_compress_batched.c.ref` | Prototype: batched processing |

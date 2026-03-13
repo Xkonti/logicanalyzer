@@ -28,10 +28,10 @@ The compression operates in four stages on a per-chunk basis:
 4. **Encoding**: Emit prefix-coded nibbles using a 16-symbol code that compresses runs while passing through mixed data with minimal overhead.
 
 **Source files:**
-- Firmware (production): `/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/stream_compress.c` (lines 1-573)
-- Firmware header: `/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/stream_compress.h` (lines 1-151)
+- Firmware (production): `/home/xkonti/repos/logicanalyzer/Firmware/stream_compress.c` (lines 1-573)
+- Firmware header: `/home/xkonti/repos/logicanalyzer/Firmware/stream_compress.h` (lines 1-151)
 - JS decoder: `/home/xkonti/repos/logicanalyzer/Software/Web/src/core/compression/decoder.js` (lines 1-181)
-- Streaming pipeline: `/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c` (lines 1-516)
+- Streaming pipeline: `/home/xkonti/repos/logicanalyzer/Firmware/LogicAnalyzer_Stream.c` (lines 1-516)
 
 ---
 

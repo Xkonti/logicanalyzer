@@ -1,6 +1,6 @@
 # LogicAnalyzer V2 Firmware — Runtime Architecture & Internals
 
-This document provides a deep dive into the runtime behavior of the LogicAnalyzer V2 firmware located in `Firmware/LogicAnalyzer_V2/`. It covers core assignment, interrupt handling, memory layout, state machines, communication abstraction, PIO programs, DMA configuration, error handling, and recovery mechanisms.
+This document provides a deep dive into the runtime behavior of the LogicAnalyzer V2 firmware located in `Firmware/`. It covers core assignment, interrupt handling, memory layout, state machines, communication abstraction, PIO programs, DMA configuration, error handling, and recovery mechanisms.
 
 ---
 

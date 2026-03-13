@@ -78,7 +78,7 @@ The firmware responds with:
 | 3 | 1 | reserved | Always 0 |
 | 4 | 4 | `actualFrequency` | Actual PIO sample rate (LE32), may differ from requested due to clock divider rounding |
 
-On the firmware side, this info header is assembled in `StartStream()` (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 316-331).
+On the firmware side, this info header is assembled in `StartStream()` (`Firmware/LogicAnalyzer_Stream.c`, lines 316-331).
 
 If the handshake response is not `"STREAM_STARTED"`, the driver returns `{ started: false, error: "Device error: ..." }`.
 
@@ -106,7 +106,7 @@ streamStore.stopStream()
 2. Polls `this.#streaming` for up to 5 seconds, waiting for the read loop to finish naturally
 3. If the read loop doesn't finish in time, force-disconnects and reconnects the transport
 
-On the firmware side, `StopStream()` (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, line 336-339) simply sets `streaming = false`. The send loop in `RunStreamSendLoop()` detects this on its next iteration, flushes remaining chunks, sends the EOF marker and status line, then returns. The main loop in `LogicAnalyzer.c` (line 859) calls `CleanupStream()` to tear down PIO/DMA/Core 1.
+On the firmware side, `StopStream()` (`Firmware/LogicAnalyzer_Stream.c`, line 336-339) simply sets `streaming = false`. The send loop in `RunStreamSendLoop()` detects this on its next iteration, flushes remaining chunks, sends the EOF marker and status line, then returns. The main loop in `LogicAnalyzer.c` (line 859) calls `CleanupStream()` to tear down PIO/DMA/Core 1.
 
 **Natural termination (firmware-initiated):**
 
@@ -131,7 +131,7 @@ After the handshake, the firmware sends a continuous stream of compressed chunk 
 [compressedSize: uint16 LE]  [compressed payload: compressedSize bytes]
 ```
 
-The firmware sends this from `RunStreamSendLoop()` (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 386-404):
+The firmware sends this from `RunStreamSendLoop()` (`Firmware/LogicAnalyzer_Stream.c`, lines 386-404):
 - `size_bytes[2]` — 2-byte little-endian compressed size
 - `stream_output[slot]` — the compressed chunk data
 
@@ -183,7 +183,7 @@ For `HDR_NIBBLE_ENC` channels: nibble-encoded compressed data using prefix codes
 Nibbles are packed MSB-first into the byte stream (high nibble of each byte is read first). After decoding, the nibble stream is repacked into transposed bytes using little-endian nibble order: `byte[j] = (nibble[2j+1] << 4) | nibble[2j]`.
 
 Defined in:
-- Firmware: `Firmware/LogicAnalyzer_V2/stream_compress.h`, lines 35-57
+- Firmware: `Firmware/stream_compress.h`, lines 35-57
 - Decoder: `Software/Web/src/core/compression/decoder.js`, lines 8-33
 
 ---
@@ -366,7 +366,7 @@ The firmware uses a fixed-size ring buffer with 8 slots (`STREAM_SLOTS = 8` in `
 - `compress_head` — incremented by Core 1 after compressing a slot
 - `send_head` — incremented by Core 0 after sending a slot over USB
 
-Overflow is detected in `RunStreamSendLoop()` (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 440-446):
+Overflow is detected in `RunStreamSendLoop()` (`Firmware/LogicAnalyzer_Stream.c`, lines 440-446):
 
 ```c
 if (dma_complete_count - send_head >= STREAM_SLOTS - 1)
@@ -393,11 +393,11 @@ The stream store displays a warning to the user: `"Stream ended due to overflow 
 
 ### Timeout Detection
 
-The firmware also has a 3-second timeout (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 448-453): if no compressed chunks are produced within 3 seconds, it exits with `STREAM_TIMEOUT`. This catches setup failures where PIO/DMA never start producing data.
+The firmware also has a 3-second timeout (`Firmware/LogicAnalyzer_Stream.c`, lines 448-453): if no compressed chunks are produced within 3 seconds, it exits with `STREAM_TIMEOUT`. This catches setup failures where PIO/DMA never start producing data.
 
 ### Disconnect Detection
 
-The firmware checks `tud_cdc_connected()` each loop iteration (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 431-437). If USB disconnects, it exits with `STREAM_DISCONN`.
+The firmware checks `tud_cdc_connected()` each loop iteration (`Firmware/LogicAnalyzer_Stream.c`, lines 431-437). If USB disconnects, it exits with `STREAM_DISCONN`.
 
 ---
 
@@ -431,11 +431,11 @@ const maxChunk = Math.floor(freq / TARGET_FPS)
 
 The UI shows the expected update rate: `~${fps} updates/sec`.
 
-On the firmware side, the requested chunk size is validated to `[32, STREAM_MAX_CHUNK(1024)]` and rounded down to a multiple of 32 (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 270-277). The actual chunk size is returned in the info header, and the driver uses that value for the read loop.
+On the firmware side, the requested chunk size is validated to `[32, STREAM_MAX_CHUNK(1024)]` and rounded down to a multiple of 32 (`Firmware/LogicAnalyzer_Stream.c`, lines 270-277). The actual chunk size is returned in the info header, and the driver uses that value for the read loop.
 
 ### Frequency Clamping
 
-The firmware computes the actual PIO frequency from the system clock and a 16-bit clock divider (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c`, lines 263-267):
+The firmware computes the actual PIO frequency from the system clock and a 16-bit clock divider (`Firmware/LogicAnalyzer_Stream.c`, lines 263-267):
 
 ```c
 float clockDiv = (float)clock_get_hz(clk_sys) / (float)req->frequency;
@@ -461,7 +461,7 @@ The host receives the actual frequency in the info header and updates the stored
 | 34 | 2 | `chunkSamples` (LE16) |
 | 36 | 4 | `frequency` (LE32) |
 
-This matches the firmware's `STREAM_REQUEST` struct (`Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h`, lines 45-55).
+This matches the firmware's `STREAM_REQUEST` struct (`Firmware/LogicAnalyzer_Structs.h`, lines 45-55).
 
 ---
 

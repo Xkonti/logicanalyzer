@@ -5,12 +5,12 @@
 Capture mode is the trigger-based high-frequency capture mode of the LogicAnalyzer V2 firmware. It captures digital signals on-hardware at frequencies up to 100MHz (or up to 200-400MHz in "blast" mode with turbo overclock), storing all samples into an on-chip buffer. Once capture is complete, the entire buffer is transferred to the host software.
 
 The implementation lives primarily in:
-- `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Capture.c` - all capture logic
-- `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Capture.h` - public API
-- `Firmware/LogicAnalyzer_V2/LogicAnalyzer.pio` - PIO assembly programs for sampling and triggering
-- `Firmware/LogicAnalyzer_V2/LogicAnalyzer.c` - command dispatch and data transfer to host
-- `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h` - protocol structures
-- `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Board_Settings.h` - per-board constants
+- `Firmware/LogicAnalyzer_Capture.c` - all capture logic
+- `Firmware/LogicAnalyzer_Capture.h` - public API
+- `Firmware/LogicAnalyzer.pio` - PIO assembly programs for sampling and triggering
+- `Firmware/LogicAnalyzer.c` - command dispatch and data transfer to host
+- `Firmware/LogicAnalyzer_Structs.h` - protocol structures
+- `Firmware/LogicAnalyzer_Board_Settings.h` - per-board constants
 
 ---
 

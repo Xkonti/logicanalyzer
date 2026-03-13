@@ -629,18 +629,18 @@ Host (TCP Client)                    Firmware (TCP Server on Core 1)
 
 | File | Description |
 |------|-------------|
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer.c` | Main firmware: command processing, USB CDC transfer, WiFi event handling |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_WiFi.c` | WiFi core: TCP server, CYW43 driver, state machine |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_WiFi.h` | WiFi state machine enum |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Structs.h` | Protocol structs: CAPTURE_REQUEST, STREAM_REQUEST, WIFI_SETTINGS, event types |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.c` | Streaming: ring buffer, DMA, Core 1 compression, send loop |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Stream.h` | Stream constants and API |
-| `Firmware/LogicAnalyzer_V2/Event_Machine.c/h` | Inter-core event queue wrapper |
-| `Firmware/LogicAnalyzer_V2/Shared_Buffers.c/h` | Shared variables between cores (event machines, WiFi settings) |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Board_Settings.h` | Board-specific defines, buffer sizes, frequencies |
-| `Firmware/LogicAnalyzer_V2/LogicAnalyzer_Build_Settings.cmake` | Build target selection |
-| `Firmware/LogicAnalyzer_V2/lwipopts.h` | lwIP TCP/IP stack configuration |
-| `Firmware/LogicAnalyzer_V2/stream_compress.h` | Compression API and format constants |
+| `Firmware/LogicAnalyzer.c` | Main firmware: command processing, USB CDC transfer, WiFi event handling |
+| `Firmware/LogicAnalyzer_WiFi.c` | WiFi core: TCP server, CYW43 driver, state machine |
+| `Firmware/LogicAnalyzer_WiFi.h` | WiFi state machine enum |
+| `Firmware/LogicAnalyzer_Structs.h` | Protocol structs: CAPTURE_REQUEST, STREAM_REQUEST, WIFI_SETTINGS, event types |
+| `Firmware/LogicAnalyzer_Stream.c` | Streaming: ring buffer, DMA, Core 1 compression, send loop |
+| `Firmware/LogicAnalyzer_Stream.h` | Stream constants and API |
+| `Firmware/Event_Machine.c/h` | Inter-core event queue wrapper |
+| `Firmware/Shared_Buffers.c/h` | Shared variables between cores (event machines, WiFi settings) |
+| `Firmware/LogicAnalyzer_Board_Settings.h` | Board-specific defines, buffer sizes, frequencies |
+| `Firmware/LogicAnalyzer_Build_Settings.cmake` | Build target selection |
+| `Firmware/lwipopts.h` | lwIP TCP/IP stack configuration |
+| `Firmware/stream_compress.h` | Compression API and format constants |
 | `Software/Web/src/core/protocol/commands.js` | Command IDs, framing constants, USB defaults |
 | `Software/Web/src/core/protocol/packets.js` | Packet serialization, struct builders |
 | `Software/Web/src/core/protocol/parser.js` | Response parsing: version, capture data, stream handshake |

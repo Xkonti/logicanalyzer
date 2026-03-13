@@ -1,4 +1,4 @@
-FIRMWARE_DIR := Firmware/LogicAnalyzer_V2
+FIRMWARE_DIR := Firmware
 BUILD_DIR := $(FIRMWARE_DIR)/build
 UF2 := $(BUILD_DIR)/LogicAnalyzer.uf2
 FLASH_TARGET := /run/media/xkonti/RP2350

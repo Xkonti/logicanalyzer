@@ -1,6 +1,6 @@
 # Logic Analyzer V2 Firmware Structure
 
-Comprehensive reference for the firmware at `Firmware/LogicAnalyzer_V2/`.
+Comprehensive reference for the firmware at `Firmware/`.
 
 ---
 
