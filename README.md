@@ -1,10 +1,8 @@
 # LogicAnalyzer
 
-This project was originally based on [LogicAnalyzer](https://github.com/gusmanb/logicanalyzer) — Copyright (C) 2025 Agustín Giménez Bernad.
+Raspberry Pico 2W based logic analyzer. Based on [LogicAnalyzer](https://github.com/gusmanb/logicanalyzer) by Agustín Giménez Bernad. This version focuses specifically on Raspberry Pico 2W and introduces web-based software rather than desktop application. It also implements a realtime-mode and doesn't support Raspberry Pico 1 or non-wifi variants.
 
-Modified and new portions of this project are Copyright (C) 2026 Beniamin Dudek.
-
-This software is released under the [GNU GPLv3](LICENSE).
+This is very much work in progress at this point.
 
 ## License
 
