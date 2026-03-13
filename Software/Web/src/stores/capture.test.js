@@ -3,6 +3,7 @@ import { setActivePinia, createPinia } from 'pinia'
 import { useCaptureStore } from './capture.js'
 import { useChannelConfigStore } from './channel-config.js'
 import { useDeviceStore } from './device.js'
+import { SampleBuffer } from '../core/sample-buffer.js'
 
 function createMockStorage() {
   const store = {}
@@ -68,9 +69,9 @@ vi.mock('../core/driver/analyzer.js', () => {
       return session.captureChannels.length > 0 && session.frequency > 0
     }
     async startCapture(session, onComplete) {
-      // Simulate successful capture with sample data
+      // Simulate successful capture with sample data (matches real driver returning SampleBuffer)
       session.captureChannels.forEach((ch) => {
-        ch.samples = new Uint8Array([1, 0, 1, 0])
+        ch.samples = SampleBuffer.fromUint8Array(new Uint8Array([1, 0, 1, 0]))
       })
       onComplete({ success: true, session })
     }
@@ -197,7 +198,7 @@ describe('useCaptureStore', () => {
       expect(capture.channels).toHaveLength(2)
       expect(capture.channels[0].samples).toBeNull() // config channels have no samples
       expect(capture.capturedChannels).toHaveLength(2)
-      expect(capture.capturedChannels[0].samples).toEqual(new Uint8Array([1, 0, 1]))
+      expect(capture.capturedChannels[0].samples.toUint8Array()).toEqual(new Uint8Array([1, 0, 1]))
       expect(capture.regions).toHaveLength(1)
       expect(capture.regions[0].regionName).toBe('R1')
       expect(capture.captureError).toBeNull()
@@ -211,7 +212,7 @@ describe('useCaptureStore', () => {
 
       expect(capture.capturedChannels).toHaveLength(2)
       expect(capture.capturedChannels[0].channelName).toBe('CLK')
-      expect(capture.capturedChannels[0].samples).toEqual(new Uint8Array([1, 0, 1]))
+      expect(capture.capturedChannels[0].samples.toUint8Array()).toEqual(new Uint8Array([1, 0, 1]))
       expect(capture.channels).toHaveLength(2)
       expect(capture.channels[0].samples).toBeNull()
       expect(capture.preTriggerSamples).toBe(0)
@@ -331,7 +332,7 @@ describe('useCaptureStore', () => {
       await capture.startCapture()
 
       expect(capture.capturedChannels).toHaveLength(2)
-      expect(capture.capturedChannels[0].samples).toEqual(new Uint8Array([1, 0, 1, 0]))
+      expect(capture.capturedChannels[0].samples.toUint8Array()).toEqual(new Uint8Array([1, 0, 1, 0]))
       expect(capture.captureError).toBeNull()
       expect(device.capturing).toBe(false)
     })
@@ -379,7 +380,9 @@ describe('useCaptureStore', () => {
       // The capturedChannels array itself may be proxied by Pinia
       // but the Uint8Array samples inside should not be deeply reactive
       const samples = capture.capturedChannels[0].samples
-      expect(samples).toBeInstanceOf(Uint8Array)
+      // SampleBuffer should not be deeply proxied by Pinia's reactivity
+      expect(samples).toBeDefined()
+      expect(typeof samples.get).toBe('function')
     })
   })
 })

@@ -8,16 +8,18 @@
  */
 
 import { getTotalSamples } from '../driver/types.js'
+import { SampleBuffer } from '../sample-buffer.js'
 
 // ─── Internal mapping: .lac JSON (PascalCase) → JS (camelCase) ───
 
 function channelFromLac(ch) {
+  const raw = ch.Samples ? new Uint8Array(ch.Samples) : null
   return {
     channelNumber: ch.ChannelNumber,
     channelName: ch.ChannelName ?? '',
     channelColor: ch.ChannelColor ?? null,
     hidden: ch.Hidden ?? false,
-    samples: ch.Samples ? new Uint8Array(ch.Samples) : null,
+    samples: raw ? SampleBuffer.fromUint8Array(raw) : null,
   }
 }
 
@@ -64,12 +66,17 @@ function sessionFromLac(s) {
 // ─── Internal mapping: JS (camelCase) → .lac JSON (PascalCase) ───
 
 function channelToLac(ch) {
+  let samplesArray = null
+  if (ch.samples) {
+    const raw = ch.samples.toUint8Array ? ch.samples.toUint8Array() : ch.samples
+    samplesArray = Array.from(raw)
+  }
   return {
     ChannelNumber: ch.channelNumber,
     ChannelName: ch.channelName,
     ChannelColor: ch.channelColor,
     Hidden: ch.hidden,
-    Samples: ch.samples ? Array.from(ch.samples) : null,
+    Samples: samplesArray,
   }
 }
 
@@ -123,11 +130,11 @@ function applyLegacySamples(session, legacySamples) {
   for (const ch of session.captureChannels) {
     if (ch.samples) continue // already has per-channel data
     const mask = 1 << ch.channelNumber
-    const result = new Uint8Array(legacySamples.length)
+    const raw = new Uint8Array(legacySamples.length)
     for (let i = 0; i < legacySamples.length; i++) {
-      result[i] = (legacySamples[i] & mask) !== 0 ? 1 : 0
+      raw[i] = (legacySamples[i] & mask) !== 0 ? 1 : 0
     }
-    ch.samples = result
+    ch.samples = SampleBuffer.fromUint8Array(raw)
   }
 }
 
@@ -198,7 +205,7 @@ export function parseCsv(csvString) {
     channelName: name,
     channelColor: null,
     hidden: false,
-    samples: samplesArrays[i],
+    samples: SampleBuffer.fromUint8Array(samplesArrays[i]),
   }))
 
   return { channels }
@@ -222,7 +229,12 @@ export function serializeCsv(session) {
   const lines = [header]
 
   for (let s = 0; s < totalSamples; s++) {
-    const row = channels.map((ch) => (ch.samples ? ch.samples[s] : 0)).join(',')
+    const row = channels
+      .map((ch) => {
+        if (!ch.samples) return 0
+        return ch.samples.get ? ch.samples.get(s) : ch.samples[s]
+      })
+      .join(',')
     lines.push(row)
   }
 

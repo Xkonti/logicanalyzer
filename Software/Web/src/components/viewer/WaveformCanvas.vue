@@ -13,8 +13,10 @@ import { ref, shallowRef, watchEffect, computed, onMounted, onBeforeUnmount } fr
 import { WaveformRenderer, MIN_CHANNEL_HEIGHT } from 'src/core/renderer/waveform-renderer.js'
 import { COLORS } from 'src/core/renderer/colors.js'
 import { useViewportStore } from 'src/stores/viewport.js'
+import { useCursorStore } from 'src/stores/cursor.js'
 import { useCapture } from 'src/composables/useCapture.js'
 import { useStream } from 'src/composables/useStream.js'
+import { useWaveformInput } from 'src/composables/useWaveformInput.js'
 
 const emit = defineEmits(['channel-height-update'])
 
@@ -23,8 +25,11 @@ const canvasRef = ref(null)
 const renderer = shallowRef(null)
 
 const viewport = useViewportStore()
+const cursor = useCursorStore()
 const cap = useCapture()
 const stream = useStream()
+
+useWaveformInput(canvasRef, renderer)
 
 const activeChannels = computed(() => {
   if (stream.isStreaming || stream.streamChannels.length > 0) return stream.streamChannels
@@ -65,30 +70,6 @@ function mapRegions(regions) {
   }))
 }
 
-function onWheel(event) {
-  if (!renderer.value) return
-
-  // Disable follow on manual scroll/zoom during stream
-  if (stream.isStreaming) {
-    stream.following = false
-  }
-
-  if (event.ctrlKey || event.metaKey) {
-    event.preventDefault()
-    const sampleAtCursor = renderer.value.sampleAtX(event.offsetX)
-    if (event.deltaY < 0) viewport.zoomIn(sampleAtCursor)
-    else viewport.zoomOut(sampleAtCursor)
-  } else {
-    event.preventDefault()
-    const scrollAmount = Math.max(1, Math.floor(viewport.visibleSamples * 0.1))
-    if (event.shiftKey) {
-      viewport.scrollBy(event.deltaY > 0 ? scrollAmount : -scrollAmount)
-    } else {
-      viewport.scrollBy(event.deltaY > 0 ? scrollAmount : -scrollAmount)
-    }
-  }
-}
-
 let resizeObserver = null
 let rafId = null
 
@@ -100,6 +81,7 @@ function scheduleRender() {
       renderer.value.resize()
       renderer.value.render()
       emit('channel-height-update', renderer.value.channelHeight)
+      viewport.setCanvasWidth(renderer.value._width)
     }
   })
 }
@@ -112,8 +94,6 @@ onMounted(() => {
     scheduleRender()
   })
   resizeObserver.observe(containerRef.value)
-
-  canvasRef.value.addEventListener('wheel', onWheel, { passive: false })
 })
 
 onBeforeUnmount(() => {
@@ -124,9 +104,6 @@ onBeforeUnmount(() => {
   if (rafId) {
     cancelAnimationFrame(rafId)
     rafId = null
-  }
-  if (canvasRef.value) {
-    canvasRef.value.removeEventListener('wheel', onWheel)
   }
   if (renderer.value) {
     renderer.value.dispose()
@@ -154,9 +131,11 @@ watchEffect(() => {
     renderer.value.setBursts(mapBursts(cap.bursts))
     renderer.value.setRegions(mapRegions(cap.regions))
   }
+  renderer.value.setCursorX(cursor.cursorX)
   renderer.value.resize()
   renderer.value.render()
   emit('channel-height-update', renderer.value.channelHeight)
+  viewport.setCanvasWidth(renderer.value._width)
 })
 
 defineExpose({ renderer })

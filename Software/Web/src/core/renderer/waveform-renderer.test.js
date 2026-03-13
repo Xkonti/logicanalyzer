@@ -318,6 +318,43 @@ describe('WaveformRenderer', () => {
     })
   })
 
+  describe('setCursorX', () => {
+    it('stores cursor position', () => {
+      renderer.setCursorX(200.5)
+      expect(renderer.cursorX).toBe(200.5)
+    })
+
+    it('accepts null to hide cursor', () => {
+      renderer.setCursorX(200)
+      renderer.setCursorX(null)
+      expect(renderer.cursorX).toBeNull()
+    })
+  })
+
+  describe('cursor line rendering', () => {
+    it('does not throw when cursor is set', () => {
+      renderer.setChannels([
+        { channelNumber: 0, visible: true, samples: new Uint8Array(100) },
+      ])
+      renderer.setViewport(0, 100)
+      renderer.setCursorX(400)
+      expect(() => renderer.render()).not.toThrow()
+    })
+
+    it('does not throw when cursor is null', () => {
+      renderer.setChannels([
+        { channelNumber: 0, visible: true, samples: new Uint8Array(100) },
+      ])
+      renderer.setViewport(0, 100)
+      renderer.setCursorX(null)
+      expect(() => renderer.render()).not.toThrow()
+    })
+
+    it('initializes cursorX as null', () => {
+      expect(renderer.cursorX).toBeNull()
+    })
+  })
+
   describe('dispose', () => {
     it('clears all references', () => {
       renderer.setChannels([{ channelNumber: 0, visible: true, samples: new Uint8Array(10) }])

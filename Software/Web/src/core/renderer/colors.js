@@ -46,6 +46,11 @@ export const COLORS = {
   dataLossFill: 'rgba(140, 30, 30, 0.35)',
   timelineBackground: 'rgb(28,28,28)',
   timelineTick: 'rgba(255,255,255,0.7)',
+  cursorLine: 'rgba(255, 255, 255, 0.5)',
+  minimapBackground: 'rgb(20,20,20)',
+  minimapViewportFill: 'rgba(255,255,255,0.12)',
+  minimapViewportStroke: 'rgba(255,255,255,0.5)',
+  minimapDimOverlay: 'rgba(0,0,0,0.4)',
 }
 
 /**
