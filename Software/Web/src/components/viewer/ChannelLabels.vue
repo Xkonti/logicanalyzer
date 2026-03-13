@@ -9,7 +9,7 @@
     >
       <div class="channel-color-dot" :style="{ backgroundColor: getChannelColor(channel.channelNumber) }" />
       <span class="channel-name text-caption">
-        {{ channel.channelName || `Ch ${channel.channelNumber}` }}
+        {{ channel.channelName || `Ch ${channel.channelNumber + 1}` }}
       </span>
       <q-space />
       <q-btn
