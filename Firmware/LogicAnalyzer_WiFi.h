@@ -5,6 +5,7 @@
 
 typedef enum
 {
+    WIFI_DISABLED,
     VALIDATE_SETTINGS,
     WAITING_SETTINGS,
     CONNECTING_AP,

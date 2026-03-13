@@ -87,8 +87,14 @@ export class SerialTransport {
 
   async disconnect() {
     this.#connected = false
+    this.#pendingRead = null
 
     if (this.#reader) {
+      try {
+        await this.#reader.cancel()
+      } catch {
+        // ignore — reader may already be released or stream closed
+      }
       try {
         this.#reader.releaseLock()
       } catch {
