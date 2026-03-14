@@ -16,6 +16,9 @@
 #include "hardware/sync.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
+#include "lwip/dhcp.h"
+#include "lwip/igmp.h"
+#include "lwip/apps/mdns.h"
 #include "tusb.h"
 
 EVENT_FROM_FRONTEND frontendEventBuffer;
@@ -28,9 +31,10 @@ struct tcp_pcb* clientPcb;
 bool apConnected = false;
 bool boot = false;
 static bool usb_was_connected = false;
+static bool mdnsActive = false;
 
 /* ---- WebSocket state ---- */
-static char ws_handshake_buf[512];
+static char ws_handshake_buf[1024];
 static uint16_t ws_handshake_pos = 0;
 static WS_FRAME_PARSER ws_parser;
 static absolute_time_t ws_handshake_deadline;
@@ -295,7 +299,7 @@ err_t acceptConnection(void *arg, struct tcp_pcb *client_pcb, err_t err)
 bool tryStartServer()
 {
     serverPcb = tcp_new_ip_type(IPADDR_TYPE_V4);
-    err_t err = tcp_bind(serverPcb, &address, wifiSettings.port);
+    err_t err = tcp_bind(serverPcb, IP_ADDR_ANY, wifiSettings.port);
 
     if (err) 
         return false;
@@ -311,11 +315,16 @@ bool tryStartServer()
 
 bool tryConnectAP()
 {
-    /* Try connecting in 2s chunks (5 × 2s = 10s total budget).
+    /* Set hostname BEFORE connecting so the DHCP client sends
+     * the correct name to the router during association. */
+    if(wifiSettings.hostname[0] != '\0' && (uint8_t)wifiSettings.hostname[0] != 0xFF)
+        netif_set_hostname(netif_list, (const char*)wifiSettings.hostname);
+
+    /* Try connecting with 10s timeout per attempt (2 attempts = 20s budget).
      * Between attempts, pump the USB stack and check if a USB
      * host opened the serial port — if so, abort early so the
      * main loop can switch to WIFI_DISABLED without a long stall. */
-    for (int attempt = 0; attempt < 5; attempt++)
+    for (int attempt = 0; attempt < 2; attempt++)
     {
         tud_task();
         if (tud_cdc_connected())
@@ -324,14 +333,8 @@ bool tryConnectAP()
         if (!cyw43_arch_wifi_connect_timeout_ms(
                 (const char*)wifiSettings.apName,
                 (const char*)wifiSettings.passwd,
-                CYW43_AUTH_WPA2_AES_PSK, 2000))
+                CYW43_AUTH_WPA2_AES_PSK, 10000))
         {
-            ipaddr_aton((const char*)wifiSettings.ipAddress, &address);
-            netif_set_ipaddr(netif_list, &address);
-
-            if(wifiSettings.hostname[0] != '\0')
-                netif_set_hostname(netif_list, (const char*)wifiSettings.hostname);
-
             apConnected = true;
             return true;
         }
@@ -344,10 +347,15 @@ void disconnectAP()
 {
     if(!apConnected)
         return;
-        
+
+    if(mdnsActive)
+    {
+        mdns_resp_remove_netif(netif_list);
+        mdnsActive = false;
+    }
+
     cyw43_wifi_leave(&cyw43_state, 0);
     apConnected = false;
-
 }
 
 void processWifiMachine()
@@ -601,6 +609,7 @@ void runWiFiCore()
     multicore_lockout_victim_init();
     cyw43_arch_init();
     cyw43_arch_enable_sta_mode();
+    /* mdns_resp_init() — deferred until basic connectivity is confirmed */
 
     EVENT_FROM_WIFI evtRdy;
     evtRdy.event = CYW_READY;

@@ -19,9 +19,9 @@ export class WebSocketTransport {
   /**
    * @param {Object} options
    * @param {string} options.host - IP address or hostname of the device
-   * @param {number} [options.port=4045] - TCP port
+   * @param {number} [options.port=4046] - TCP port
    */
-  constructor({ host, port = 4045 }) {
+  constructor({ host, port = 4046 }) {
     this.#host = host
     this.#port = port
     /** @type {(() => void) | null} */

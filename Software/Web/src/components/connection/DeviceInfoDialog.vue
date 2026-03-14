@@ -74,10 +74,10 @@
           <div class="row q-col-gutter-x-sm">
             <div class="col">
               <q-input
-                v-model="form.ipAddress"
-                label="IP Address"
-                maxlength="15"
-                :rules="[ipRule]"
+                v-model="form.hostname"
+                label="Hostname (optional)"
+                maxlength="32"
+                :rules="[hostnameRule]"
                 :disable="isWiFiConnected"
                 hide-bottom-space
                 dense
@@ -99,17 +99,9 @@
               />
             </div>
           </div>
-          <q-input
-            v-model="form.hostname"
-            label="Hostname (optional)"
-            maxlength="32"
-            :rules="[hostnameRule]"
-            :disable="isWiFiConnected"
-            hide-bottom-space
-            dense
-            outlined
-            dark
-          />
+          <div class="text-caption text-grey-6 q-mt-none" style="margin-top: -4px">
+            Used for mDNS discovery (hostname.local). Leave empty to disable mDNS.
+          </div>
           <q-btn
             label="Save Network Settings"
             color="positive"
@@ -202,8 +194,7 @@ const limitsRows = computed(() => {
 const form = reactive({
   ssid: '',
   password: '',
-  ipAddress: '192.168.4.1',
-  port: 4045,
+  port: 4046,
   hostname: '',
 })
 
@@ -211,14 +202,12 @@ const form = reactive({
 const initialForm = reactive({
   ssid: '',
   password: '',
-  ipAddress: '192.168.4.1',
-  port: 4045,
+  port: 4046,
   hostname: '',
 })
 
 const ssidRule = (val) => (val && val.length > 0 && val.length <= 32) || 'Required, max 32 chars'
 const passwordRule = (val) => !val || val.length <= 63 || 'Max 63 chars'
-const ipRule = (val) => /^(\d{1,3}\.){3}\d{1,3}$/.test(val) || 'Must be a valid IPv4 address'
 const portRule = (val) =>
   (Number.isInteger(Number(val)) && val >= 1 && val <= 65535) || 'Must be 1-65535'
 const hostnameRule = (val) => !val || val.length <= 32 || 'Max 32 chars'
@@ -227,7 +216,6 @@ const formValid = computed(() => {
   return (
     ssidRule(form.ssid) === true &&
     passwordRule(form.password) === true &&
-    ipRule(form.ipAddress) === true &&
     portRule(form.port) === true &&
     hostnameRule(form.hostname) === true
   )
@@ -237,7 +225,6 @@ const formDirty = computed(() => {
   return (
     form.ssid !== initialForm.ssid ||
     form.password !== initialForm.password ||
-    form.ipAddress !== initialForm.ipAddress ||
     form.port !== initialForm.port ||
     form.hostname !== initialForm.hostname
   )
@@ -250,13 +237,11 @@ function resetForm() {
   const di = device.deviceInfo
   form.ssid = di?.ssid || ''
   form.password = ''
-  form.ipAddress = '192.168.4.1'
-  form.port = 4045
+  form.port = 4046
   form.hostname = di?.hostname || ''
 
   initialForm.ssid = form.ssid
   initialForm.password = form.password
-  initialForm.ipAddress = form.ipAddress
   initialForm.port = form.port
   initialForm.hostname = form.hostname
 
@@ -282,7 +267,7 @@ async function onSave() {
   const success = await device.sendNetworkConfig({
     ssid: form.ssid,
     password: form.password,
-    ipAddress: form.ipAddress,
+    ipAddress: '0.0.0.0',
     port: form.port,
     hostname: form.hostname || '',
   })
