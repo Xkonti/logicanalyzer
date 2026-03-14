@@ -19,6 +19,11 @@
 extern void sendResponse(const char* response, bool toWiFi);
 
 extern void wifi_transfer(unsigned char* data, int len);
+
+/* Direct WiFi send from Core 1 — bypasses event queue (LogicAnalyzer_WiFi.c) */
+extern void wifi_send_direct(const uint8_t* data, uint16_t len);
+extern void wifi_send_direct_2(const uint8_t* d1, uint16_t l1,
+                               const uint8_t* d2, uint16_t l2);
 /* usb_bulk_transfer_blocking is for Core 0 → Core 1 handoff (capture data, handshake).
  * During streaming, Core 1 uses usb_cdc_write_bulk directly (it owns TinyUSB). */
 extern void usb_bulk_transfer_blocking(unsigned char* data, int len);
@@ -406,8 +411,9 @@ static void stream_send_chunk(const uint8_t* data, uint32_t size)
 
     if (stream_from_wifi)
     {
-        wifi_transfer(size_bytes, 2);
-        wifi_transfer((unsigned char*)data, sz);
+        /* Direct send from Core 1 — bypasses event queue to avoid deadlock
+         * and wraps in WS frame if WebSocket connection. */
+        wifi_send_direct_2(size_bytes, 2, data, sz);
     }
     else
     {
@@ -420,7 +426,7 @@ static void stream_send_eof(void)
 {
     uint8_t eof[2] = { 0x00, 0x00 };
     if (stream_from_wifi)
-        wifi_transfer(eof, 2);
+        wifi_send_direct(eof, 2);
     else
         usb_cdc_write_bulk_ext(eof, 2);
 }
@@ -448,9 +454,12 @@ static void stream_send_skip_report(uint8_t count)
 
         if (stream_from_wifi)
         {
-            wifi_transfer(header, 3);
-            wifi_transfer((unsigned char*)compress_skips, data_bytes);
-            wifi_transfer((unsigned char*)transmit_skips, data_bytes);
+            /* Combine into single buffer for one WS frame */
+            uint8_t skip_buf[3 + 64 * 2 + 64 * 2];  /* max: 3 + 128 + 128 = 259 */
+            memcpy(skip_buf, header, 3);
+            memcpy(skip_buf + 3, compress_skips, data_bytes);
+            memcpy(skip_buf + 3 + data_bytes, transmit_skips, data_bytes);
+            wifi_send_direct(skip_buf, 3 + data_bytes + data_bytes);
         }
         else
         {

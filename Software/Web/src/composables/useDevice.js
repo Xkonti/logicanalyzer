@@ -16,11 +16,21 @@ export function useDevice() {
   const channelCount = computed(() => store.channelCount)
   const maxFrequency = computed(() => store.maxFrequency)
   const bufferSize = computed(() => store.bufferSize)
+  const transportType = computed(() => store.transportType)
 
   async function connect() {
     connecting.value = true
     try {
       await store.connect()
+    } finally {
+      connecting.value = false
+    }
+  }
+
+  async function connectWiFi(host, port) {
+    connecting.value = true
+    try {
+      await store.connect({ type: 'websocket', host, port })
     } finally {
       connecting.value = false
     }
@@ -55,6 +65,7 @@ export function useDevice() {
     isConnected,
     isCapturing,
     connecting,
+    transportType,
     deviceInfo,
     error,
     deviceVersion,
@@ -62,6 +73,7 @@ export function useDevice() {
     maxFrequency,
     bufferSize,
     connect,
+    connectWiFi,
     disconnect,
     clearError,
     blinkLed,

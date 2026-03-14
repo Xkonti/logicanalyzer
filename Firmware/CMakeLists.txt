@@ -70,6 +70,7 @@ target_link_libraries(LogicAnalyzer
         pico_multicore
         cmsis_core
         ${CYW_LIB}
+        pico_lwip_mdns
         )
 
 pico_add_extra_outputs(LogicAnalyzer)

@@ -23,7 +23,7 @@
 #define MEM_SIZE                    4000
 #define MEMP_NUM_TCP_SEG            32
 #define MEMP_NUM_ARP_QUEUE          10
-#define PBUF_POOL_SIZE              24
+#define PBUF_POOL_SIZE              16
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
@@ -51,6 +51,13 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
+
+#define LWIP_MDNS_RESPONDER             1
+#define LWIP_MDNS_SEARCH                0
+#define MDNS_MAX_STORED_PKTS            1
+#define LWIP_IGMP                       1
+#define LWIP_NETIF_EXT_STATUS_CALLBACK  1
+#define LWIP_NUM_NETIF_CLIENT_DATA      1
 
 #ifndef NDEBUG
 #define LWIP_DEBUG                  1

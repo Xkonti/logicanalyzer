@@ -4,6 +4,7 @@
 #include "LogicAnalyzer_WiFi.h"
 #include "LogicAnalyzer_Structs.h"
 #include "LogicAnalyzer_Stream.h"
+#include "ws_protocol.h"
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
@@ -15,6 +16,9 @@
 #include "hardware/sync.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
+#include "lwip/dhcp.h"
+#include "lwip/igmp.h"
+#include "lwip/apps/mdns.h"
 #include "tusb.h"
 
 EVENT_FROM_FRONTEND frontendEventBuffer;
@@ -27,6 +31,13 @@ struct tcp_pcb* clientPcb;
 bool apConnected = false;
 bool boot = false;
 static bool usb_was_connected = false;
+static bool mdnsActive = false;
+
+/* ---- WebSocket state ---- */
+static char ws_handshake_buf[1024];
+static uint16_t ws_handshake_pos = 0;
+static WS_FRAME_PARSER ws_parser;
+static absolute_time_t ws_handshake_deadline;
 
 #define LED_ON() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1)
 #define LED_OFF() cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0)
@@ -87,25 +98,31 @@ void killClient()
         tcp_close(clientPcb);
         clientPcb = NULL;
     }
+    ws_handshake_pos = 0;
     currentState = WAITING_TCP_CLIENT;
 }
 
 void sendData(uint8_t* data, uint8_t len)
 {
-    while(clientPcb && tcp_sndbuf(clientPcb) < len)
+    if (!clientPcb) return;
+
+    uint8_t header[4];
+    uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, len);
+
+    while (clientPcb && tcp_sndbuf(clientPcb) < hlen + len)
     {
         cyw43_arch_poll();
         sleep_ms(1);
     }
 
-    if(tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY))
+    if (tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE) ||
+        tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY))
     {
         killClient();
         EVENT_FROM_WIFI evt;
         evt.event = DISCONNECTED;
         event_push(&wifiToFrontend, &evt);
     }
-    
 }
 
 void serverError(void *arg, err_t err)
@@ -121,36 +138,142 @@ err_t serverReceiveData(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t e
 {
     EVENT_FROM_WIFI evt;
 
-    //Client disconnected
-    if(!p || p->tot_len == 0)
+    /* Client disconnected */
+    if (!p || p->tot_len == 0)
     {
-        if(p)
+        if (p)
             pbuf_free(p);
-            
+
         killClient();
         evt.event = DISCONNECTED;
         event_push(&wifiToFrontend, &evt);
         return ERR_ABRT;
     }
 
-    uint16_t left = p->tot_len;
-    uint16_t pos = 0;
-
-    while(left)
+    /* ---- WebSocket handshake accumulation ---- */
+    if (currentState == WS_HANDSHAKE_PENDING)
     {
-        uint8_t copy = left > 128 ? 128 : left;
-        evt.event = DATA_RECEIVED;
-        evt.dataLength = copy;
-        pbuf_copy_partial(p, evt.data, copy, pos);
-        event_push(&wifiToFrontend, &evt);
-        pos += copy;
-        left -= copy;
+        uint16_t copy_len = p->tot_len;
+        if (ws_handshake_pos + copy_len >= sizeof(ws_handshake_buf) - 1)
+        {
+            /* Request too large — abort */
+            killClient();
+            pbuf_free(p);
+            return ERR_ABRT;
+        }
+
+        pbuf_copy_partial(p, ws_handshake_buf + ws_handshake_pos, copy_len, 0);
+        ws_handshake_pos += copy_len;
+        ws_handshake_buf[ws_handshake_pos] = '\0';
+
+        tcp_recved(clientPcb, copy_len);
+        pbuf_free(p);
+
+        /* Check for complete HTTP request */
+        if (strstr(ws_handshake_buf, "\r\n\r\n"))
+        {
+            char response[256];
+            uint16_t resp_len = ws_build_handshake_response(
+                ws_handshake_buf, response, sizeof(response));
+
+            if (resp_len == 0)
+            {
+                killClient();
+                return ERR_ABRT;
+            }
+
+            tcp_write(clientPcb, response, resp_len, TCP_WRITE_FLAG_COPY);
+            tcp_output(clientPcb);
+            tcp_nagle_disable(clientPcb);
+
+            currentState = TCP_CLIENT_CONNECTED;
+
+            evt.event = CONNECTED;
+            event_push(&wifiToFrontend, &evt);
+        }
+
+        return ERR_OK;
     }
 
+    /* ---- WebSocket frame parsing ---- */
+    if (currentState == TCP_CLIENT_CONNECTED)
+    {
+        uint16_t offset = 0;
+        uint16_t remaining = p->tot_len;
+        uint8_t temp[128];
+
+        while (remaining > 0)
+        {
+            uint16_t chunk = remaining > sizeof(temp) ? sizeof(temp) : remaining;
+            pbuf_copy_partial(p, temp, chunk, offset);
+
+            uint16_t pos = 0;
+            while (pos < chunk)
+            {
+                bool frame_ready = false;
+                pos += ws_parser_feed(&ws_parser, temp + pos, chunk - pos, &frame_ready);
+
+                if (frame_ready)
+                {
+                    uint8_t opcode = ws_parser.opcode;
+
+                    if (opcode == 0x08)  /* Close */
+                    {
+                        uint8_t close_frame[2];
+                        ws_build_frame_header(close_frame, WS_OP_CLOSE, 0);
+                        tcp_write(clientPcb, close_frame, 2, TCP_WRITE_FLAG_COPY);
+                        tcp_output(clientPcb);
+                        killClient();
+                        evt.event = DISCONNECTED;
+                        event_push(&wifiToFrontend, &evt);
+                        pbuf_free(p);
+                        return ERR_ABRT;
+                    }
+                    else if (opcode == 0x09)  /* Ping → Pong */
+                    {
+                        uint8_t pong_header[4];
+                        uint8_t hlen = ws_build_frame_header(
+                            pong_header, WS_OP_PONG, ws_parser.payload_len);
+                        tcp_write(clientPcb, pong_header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+                        if (ws_parser.payload_len > 0)
+                            tcp_write(clientPcb, ws_parser.payload,
+                                      ws_parser.payload_len, TCP_WRITE_FLAG_COPY);
+                        tcp_output(clientPcb);
+                    }
+                    else if (opcode == 0x01 || opcode == 0x02)  /* Text or Binary data */
+                    {
+                        /* Push unmasked payload as DATA_RECEIVED events */
+                        uint16_t pay_left = ws_parser.payload_len;
+                        uint16_t pay_pos = 0;
+                        while (pay_left)
+                        {
+                            uint8_t copy = pay_left > 128 ? 128 : pay_left;
+                            evt.event = DATA_RECEIVED;
+                            evt.dataLength = copy;
+                            memcpy(evt.data, ws_parser.payload + pay_pos, copy);
+                            event_push(&wifiToFrontend, &evt);
+                            pay_pos += copy;
+                            pay_left -= copy;
+                        }
+                    }
+                    /* else: ignore unknown opcodes (including continuation 0x00) */
+
+                    ws_parser_init(&ws_parser);
+                }
+            }
+
+            offset += chunk;
+            remaining -= chunk;
+        }
+
+        tcp_recved(clientPcb, p->tot_len);
+        pbuf_free(p);
+        return ERR_OK;
+    }
+
+    /* Unexpected data in wrong state — discard */
     pbuf_free(p);
-
     return ERR_OK;
-
 }
 
 err_t acceptConnection(void *arg, struct tcp_pcb *client_pcb, err_t err)
@@ -163,11 +286,12 @@ err_t acceptConnection(void *arg, struct tcp_pcb *client_pcb, err_t err)
     tcp_recv(clientPcb, serverReceiveData);
     tcp_err(clientPcb, serverError);
 
-    currentState = TCP_CLIENT_CONNECTED;
-
-    EVENT_FROM_WIFI evt;
-    evt.event = CONNECTED;
-    event_push(&wifiToFrontend, &evt);
+    /* Begin WebSocket handshake. CONNECTED event is deferred until
+     * the upgrade handshake completes successfully. */
+    currentState = WS_HANDSHAKE_PENDING;
+    ws_handshake_pos = 0;
+    ws_handshake_deadline = make_timeout_time_ms(5000);
+    ws_parser_init(&ws_parser);
 
     return ERR_OK;
 }
@@ -175,7 +299,7 @@ err_t acceptConnection(void *arg, struct tcp_pcb *client_pcb, err_t err)
 bool tryStartServer()
 {
     serverPcb = tcp_new_ip_type(IPADDR_TYPE_V4);
-    err_t err = tcp_bind(serverPcb, &address, wifiSettings.port);
+    err_t err = tcp_bind(serverPcb, IP_ADDR_ANY, wifiSettings.port);
 
     if (err) 
         return false;
@@ -186,15 +310,21 @@ bool tryStartServer()
         return false;
 
     tcp_accept(serverPcb, acceptConnection);
+    return true;
 }
 
 bool tryConnectAP()
 {
-    /* Try connecting in 2s chunks (5 × 2s = 10s total budget).
+    /* Set hostname BEFORE connecting so the DHCP client sends
+     * the correct name to the router during association. */
+    if(wifiSettings.hostname[0] != '\0' && (uint8_t)wifiSettings.hostname[0] != 0xFF)
+        netif_set_hostname(netif_list, (const char*)wifiSettings.hostname);
+
+    /* Try connecting with 10s timeout per attempt (2 attempts = 20s budget).
      * Between attempts, pump the USB stack and check if a USB
      * host opened the serial port — if so, abort early so the
      * main loop can switch to WIFI_DISABLED without a long stall. */
-    for (int attempt = 0; attempt < 5; attempt++)
+    for (int attempt = 0; attempt < 2; attempt++)
     {
         tud_task();
         if (tud_cdc_connected())
@@ -203,14 +333,8 @@ bool tryConnectAP()
         if (!cyw43_arch_wifi_connect_timeout_ms(
                 (const char*)wifiSettings.apName,
                 (const char*)wifiSettings.passwd,
-                CYW43_AUTH_WPA2_AES_PSK, 2000))
+                CYW43_AUTH_WPA2_AES_PSK, 10000))
         {
-            ipaddr_aton((const char*)wifiSettings.ipAddress, &address);
-            netif_set_ipaddr(netif_list, &address);
-
-            if(wifiSettings.hostname[0] != '\0')
-                netif_set_hostname(netif_list, (const char*)wifiSettings.hostname);
-
             apConnected = true;
             return true;
         }
@@ -223,10 +347,15 @@ void disconnectAP()
 {
     if(!apConnected)
         return;
-        
+
+    if(mdnsActive)
+    {
+        mdns_resp_remove_netif(netif_list);
+        mdnsActive = false;
+    }
+
     cyw43_wifi_leave(&cyw43_state, 0);
     apConnected = false;
-
 }
 
 void processWifiMachine()
@@ -276,9 +405,56 @@ void processWifiMachine()
             if(tryStartServer())
                 currentState = WAITING_TCP_CLIENT;
             break;
+        case WS_HANDSHAKE_PENDING:
+            if (time_reached(ws_handshake_deadline))
+                killClient();
+            break;
         default:
             break;
     }
+}
+
+/* ---- Direct WiFi send from Core 1 (bypasses event queue) ---- */
+
+void wifi_send_direct(const uint8_t* data, uint16_t len)
+{
+    if (!clientPcb) return;
+
+    uint8_t header[4];
+    uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, len);
+
+    while (clientPcb && tcp_sndbuf(clientPcb) < (uint16_t)(hlen + len))
+    {
+        cyw43_arch_poll();
+        sleep_ms(1);
+    }
+    if (!clientPcb) return;
+
+    tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+    tcp_write(clientPcb, data, len, TCP_WRITE_FLAG_COPY);
+    tcp_output(clientPcb);
+}
+
+void wifi_send_direct_2(const uint8_t* d1, uint16_t l1,
+                        const uint8_t* d2, uint16_t l2)
+{
+    if (!clientPcb) return;
+
+    uint16_t total = l1 + l2;
+    uint8_t header[4];
+    uint8_t hlen = ws_build_frame_header(header, WS_OP_BINARY, total);
+
+    while (clientPcb && tcp_sndbuf(clientPcb) < (uint16_t)(hlen + total))
+    {
+        cyw43_arch_poll();
+        sleep_ms(1);
+    }
+    if (!clientPcb) return;
+
+    tcp_write(clientPcb, header, hlen, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+    tcp_write(clientPcb, d1, l1, TCP_WRITE_FLAG_COPY | TCP_WRITE_FLAG_MORE);
+    tcp_write(clientPcb, d2, l2, TCP_WRITE_FLAG_COPY);
+    tcp_output(clientPcb);
 }
 
 void frontendEvent(void* event)
@@ -328,7 +504,8 @@ static void usb_process_input(void)
         event_push(&usbToFrontend, &evt);
 
         /* Disable WiFi — USB takes priority */
-        if (currentState == TCP_CLIENT_CONNECTED)
+        if (currentState == TCP_CLIENT_CONNECTED ||
+            currentState == WS_HANDSHAKE_PENDING)
         {
             EVENT_FROM_WIFI wifiEvt;
             wifiEvt.event = DISCONNECTED;
@@ -432,6 +609,7 @@ void runWiFiCore()
     multicore_lockout_victim_init();
     cyw43_arch_init();
     cyw43_arch_enable_sta_mode();
+    /* mdns_resp_init() — deferred until basic connectivity is confirmed */
 
     EVENT_FROM_WIFI evtRdy;
     evtRdy.event = CYW_READY;

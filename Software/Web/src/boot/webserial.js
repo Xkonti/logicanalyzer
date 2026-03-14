@@ -8,7 +8,8 @@ export default defineBoot(() => {
   if (!webSerialAvailable.value) {
     Notify.create({
       type: 'warning',
-      message: 'Web Serial API is not available. Use Chrome or Edge to connect to devices.',
+      message:
+        'Web Serial API is not available. Use Chrome or Edge for USB connections, or connect via WiFi.',
       position: 'top',
       timeout: 0,
       actions: [{ label: 'Dismiss', color: 'dark' }],

@@ -117,6 +117,15 @@ void sendResponse(const char* response, bool toWiFi)
 {
     if(toWiFi)
     {
+        /* During streaming, sendResponse is called from Core 1
+         * (stream_process_transmit → "STREAM_DONE"). Use direct send
+         * to avoid event queue interaction. */
+        if (stream_transmit_active)
+        {
+            wifi_send_direct((const uint8_t*)response, strlen(response));
+            return;
+        }
+
         EVENT_FROM_FRONTEND evt;
         evt.event = SEND_DATA;
         uint8_t len = strlen(response);
@@ -484,8 +493,7 @@ void wifiEvent(void* event)
 
 /// @brief Receives and processes input from the host application (when connected through WiFi)
 /// @param skipProcessing If true the received data is not processed (used for cleanup)
-/// @return True if anything is received, false if not
-bool processWiFiInput(bool skipProcessing)
+void processWiFiInput(bool skipProcessing)
 {
     if(skipProcessing)
     {
@@ -495,8 +503,6 @@ bool processWiFiInput(bool skipProcessing)
     event_process_queue(&wifiToFrontend, &wifiEventBuffer, 8);
 
     skipWiFiData = false;
-
-    return false;
 }
 
 /* USB event buffer for Core 0 processing */
