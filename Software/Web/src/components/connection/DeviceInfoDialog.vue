@@ -208,8 +208,7 @@ const initialForm = reactive({
 
 const ssidRule = (val) => (val && val.length > 0 && val.length <= 32) || 'Required, max 32 chars'
 const passwordRule = (val) => !val || val.length <= 63 || 'Max 63 chars'
-const portRule = (val) =>
-  (Number.isInteger(Number(val)) && val >= 1 && val <= 65535) || 'Must be 1-65535'
+import { portRule } from 'src/core/protocol/ports.js'
 const hostnameRule = (val) => !val || val.length <= 32 || 'Max 32 chars'
 
 const formValid = computed(() => {

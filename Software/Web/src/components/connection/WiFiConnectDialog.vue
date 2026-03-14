@@ -111,8 +111,7 @@ const hostnameRule = (val) =>
   (val && val.length > 0 && val.length <= 32 && /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(val)) ||
   'Letters, numbers, hyphens (max 32)'
 const ipRule = (val) => /^(\d{1,3}\.){3}\d{1,3}$/.test(val) || 'Must be a valid IPv4 address'
-const portRule = (val) =>
-  (Number.isInteger(Number(val)) && val >= 1 && val <= 65535) || 'Must be 1-65535'
+import { portRule } from 'src/core/protocol/ports.js'
 
 const formValid = computed(() => {
   if (portRule(port.value) !== true) return false
